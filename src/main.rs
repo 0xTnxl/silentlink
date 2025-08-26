@@ -39,6 +39,8 @@ pub struct SilentLinkConfiguration {
     pub crypto: CryptoConfig,
     pub mesh: MeshConfig,
     pub storage_path: Option<PathBuf>,
+    pub enable_privileged_mode: bool,
+    pub target_device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +109,8 @@ impl Default for SilentLinkConfiguration {
                 max_cached_messages: 1000, 
             }, 
             storage_path: dirs::data_dir().map(|d| d.join("silentlink")),
+            enable_privileged_mode: false,
+            target_device_id: None,
         }
     }
 }
@@ -1521,7 +1525,16 @@ impl SilentLink {
             config.crypto.clone(),
         ));
 
-        let exploit_engine = ExploitEngine::new();
+        let mut exploit_engine = if config.enable_privileged_mode {
+            ExploitEngine::new_with_privileged_access(None)
+        } else {
+            ExploitEngine::new()
+        };
+
+        // Initialize the exploit engine to gather system info
+        if let Err(e) = exploit_engine.initialize().await {
+            warn!("Failed to initialize exploit engine: {}", e);
+        }
 
         Ok(Self {
             config,
@@ -1653,6 +1666,29 @@ impl SilentLink {
         self.is_running.load(Ordering::Acquire)
     }
 
+    /// Get system and platform information
+    pub async fn get_system_info(&self) -> Result<()> {
+        if let Some(info) = self.exploit_engine.get_system_info() {
+            println!("🖥️ System Information:");
+            println!("  Platform: {} {}", info.platform, info.version);
+            println!("  Architecture: {}", info.architecture);
+            println!("  Root Access: {}", info.root_access);
+            if let Some(kernel) = &info.kernel_version {
+                println!("  Kernel: {}", kernel);
+            }
+            if !info.installed_frameworks.is_empty() {
+                println!("  Security Frameworks: {}", info.installed_frameworks.join(", "));
+            }
+        }
+
+        let capabilities = self.exploit_engine.get_platform_capabilities();
+        if !capabilities.is_empty() {
+            println!("🛠️ Platform Capabilities: {}", capabilities.join(", "));
+        }
+
+        Ok(())
+    }
+
     /// Send message via trojan injection if direct communication fails
     pub async fn send_via_trojan(&self, content: String, target_device_id: Option<DeviceId>) -> Result<Uuid> {
         info!("🕵️ Attempting trojan-style message delivery");
@@ -1693,6 +1729,15 @@ impl SilentLink {
     /// Covert device reconnaissance 
     pub async fn reconnaissance_mode(&self) -> Result<()> {
         info!("🔍 Starting covert device reconnaissance");
+
+        // Get system information using platform adapter
+        let system_info = self.platform_adapter.get_system_info().await?;
+        info!("🖥️ Platform: {} {} ({})", system_info.platform, system_info.version, system_info.architecture);
+        info!("🔐 Root access: {}", system_info.root_access);
+        
+        if !system_info.installed_frameworks.is_empty() {
+            info!("🛠️ Security frameworks: {}", system_info.installed_frameworks.join(", "));
+        }
 
         // 1. Passive ultrasonic scanning (extended range)
         info!("👂 Listening for ultrasonic beacons...");
@@ -2072,10 +2117,19 @@ pub enum Commands {
 pub async fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     
-    // Initialize logging
+    // Initialize logging with safe environment handling
     let log_level = if cli.verbose { "debug" } else { "info" };
-    std::env::set_var("RUST_LOG", format!("silentlink={}", log_level));
-    tracing_subscriber::fmt::init();
+    
+    // Use tracing_subscriber builder to avoid unsafe env modification
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| format!("silentlink={}", log_level))
+        )
+        .finish();
+    
+    tracing::subscriber::set_global_default(subscriber)
+        .map_err(|e| SilentLinkError::System(format!("Failed to set logger: {}", e)))?;
 
     // Load configuration
     let mut config = SilentLinkConfiguration::default();
@@ -2167,6 +2221,9 @@ pub async fn run_cli() -> Result<()> {
             println!("Messages Received: {}", stats.messages_received);
             println!("Messages Forwarded: {}", stats.messages_forwarded);
             println!("Active Neighbors: {}", stats.active_neighbors);
+            
+            // Show system information
+            let _ = silentlink.get_system_info().await;
             
             silentlink.stop().await?;
         }
