@@ -25,7 +25,10 @@ use config::{Config, ConfigError, File};
 use clap::{Parser, Subcommand};
 
 mod exploit_engine;
+mod platform;
+
 use exploit_engine::ExploitEngine;
+use platform::{PlatformAdapter, create_platform_adapter, AudioStreamManager};
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +237,7 @@ pub struct UltrasonicEngine {
     shared_secrets: Arc<RwLock<HashMap<String, SharedSecret>>>,
     is_running: Arc<AtomicBool>,
     beacon_tx: Arc<Mutex<Option<mpsc::UnboundedSender<UltrasonicBeacon>>>>,
+    stream_manager: Arc<Mutex<AudioStreamManager>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,6 +260,7 @@ impl UltrasonicEngine {
             shared_secrets,
             is_running: Arc::new(AtomicBool::new(false)),
             beacon_tx: Arc::new(Mutex::new(None)),
+            stream_manager: Arc::new(Mutex::new(AudioStreamManager::new())),
         }
     }
 
@@ -272,6 +277,9 @@ impl UltrasonicEngine {
         // Start audio input/output streams
         let input_stream = self.start_audio_input(beacon_tx.clone()).await?;
         let output_stream = self.start_audio_output().await?;
+
+        // Store streams in the manager to prevent memory leaks
+        self.stream_manager.lock().await.set_streams(input_stream, output_stream);
 
         // Start beacon emission task
         let config_clone = self.config.clone();
@@ -314,10 +322,6 @@ impl UltrasonicEngine {
             }
         };
         tokio::spawn(emission_task);
-
-        // Keep streams alive (in real implementation, store these in struct)
-        std::mem::forget(input_stream);
-        std::mem::forget(output_stream);
 
         info!("Ultrasonic engine started");
         Ok(beacon_rx)
@@ -416,6 +420,7 @@ impl UltrasonicEngine {
         Ok(stream)
     }
 
+    #[allow(dead_code)]
     async fn create_beacon(&self) -> Result<UltrasonicBeacon> {
         let secrets = self.shared_secrets.read().await;
         let handshake_token = if let Some(secret) = secrets.values().next() {
@@ -527,6 +532,7 @@ impl UltrasonicEngine {
         None
     }
 
+    #[allow(dead_code)]
     fn generate_handshake_token(&self, secret: &[u8]) -> Result<Vec<u8>> {
         Self::generate_handshake_token_static(secret, &self.device_id)
     }
@@ -541,6 +547,10 @@ impl UltrasonicEngine {
     pub async fn stop(&self) {
         self.is_running.store(false, Ordering::Release);
         *self.beacon_tx.lock().await = None;
+        
+        // Clean up audio streams properly
+        self.stream_manager.lock().await.stop_streams();
+        
         info!("Ultrasonic engine stopped");
     }
 }
@@ -834,6 +844,7 @@ pub struct CryptoEngine {
     device_public_key: PublicKey,
     shared_secrets: Arc<RwLock<HashMap<String, SharedSecret>>>,
     session_keys: Arc<RwLock<HashMap<DeviceId, [u8; 32]>>>,
+    #[allow(dead_code)]
     config: CryptoConfig,
 }
 
@@ -1027,7 +1038,7 @@ impl MessageRouter {
         let config_clone = self.config.clone();
         let neighbor_table_clone = self.neighbor_table.clone();
         let stats_clone = self.stats.clone();
-        let device_id_clone = self.device_id.clone();
+        let _device_id_clone = self.device_id.clone();
         
         // Start neighbor cleanup task
         let neighbor_cleanup_task = async move {
@@ -1059,7 +1070,7 @@ impl MessageRouter {
         let crypto_engine_clone = self.crypto_engine.clone();
         let stats_clone2 = self.stats.clone();
         let message_cache_clone = self.message_cache.clone();
-        let routing_table_clone = self.routing_table.clone();
+        let _routing_table_clone = self.routing_table.clone();
         let bluetooth_manager_clone = self.bluetooth_manager.clone();
         
         let routing_update_task = async move {
@@ -1477,6 +1488,7 @@ pub struct SilentLink {
     message_router: Arc<MessageRouter>,
     shared_secrets: Arc<RwLock<HashMap<String, SharedSecret>>>,
     exploit_engine: ExploitEngine,
+    platform_adapter: Box<dyn PlatformAdapter + Send + Sync>,
     is_running: Arc<AtomicBool>,
 }
 
@@ -1509,6 +1521,8 @@ impl SilentLink {
             config.crypto.clone(),
         ));
 
+        let exploit_engine = ExploitEngine::new();
+
         Ok(Self {
             config,
             device_id,
@@ -1517,7 +1531,8 @@ impl SilentLink {
             crypto_engine,
             message_router,
             shared_secrets,
-            exploit_engine: ExploitEngine::new(),
+            exploit_engine,
+            platform_adapter: create_platform_adapter(),
             is_running: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -1726,6 +1741,7 @@ impl SilentLink {
         }
     }
 }
+
 
 struct SilentLinkEventLoop {
     device_id: DeviceId,
@@ -2058,9 +2074,7 @@ pub async fn run_cli() -> Result<()> {
     
     // Initialize logging
     let log_level = if cli.verbose { "debug" } else { "info" };
-    unsafe {
-        std::env::set_var("RUST_LOG", format!("silentlink={}", log_level));
-    }
+    std::env::set_var("RUST_LOG", format!("silentlink={}", log_level));
     tracing_subscriber::fmt::init();
 
     // Load configuration
