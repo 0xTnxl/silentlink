@@ -26,9 +26,14 @@ use clap::{Parser, Subcommand};
 
 mod exploit_engine;
 mod platform;
+mod wifi;
+mod transport;
+mod bluetooth;
 
 use exploit_engine::ExploitEngine;
 use platform::{PlatformAdapter, create_platform_adapter, AudioStreamManager};
+use wifi::WiFiConfig;
+use transport::{TransportManager, TransportConfig, TransportType};
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +41,8 @@ pub struct SilentLinkConfiguration {
     pub device_name: String,
     pub audio: AudioConfig,
     pub bluetooth: BluetoothConfig,
+    pub wifi: WiFiConfig,
+    pub transport: TransportConfig,
     pub crypto: CryptoConfig,
     pub mesh: MeshConfig,
     pub storage_path: Option<PathBuf>,
@@ -62,6 +69,18 @@ pub struct BluetoothConfig {
     pub scan_timeout_ms: u64,
     pub connection_timeout_ms: u64,
     pub max_connections: usize,
+}
+
+impl Default for BluetoothConfig {
+    fn default() -> Self {
+        Self {
+            service_uuid: "6ba7b810-9dad-11d1-80b4-00c04fd430c8".to_string(),
+            characteristic_uuid: "6ba7b810-9dad-11d1-80b4-00c04fd430c8".to_string(),
+            scan_timeout_ms: 30000,
+            connection_timeout_ms: 10000,
+            max_connections: 10,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,7 +117,9 @@ impl Default for SilentLinkConfiguration {
                 scan_timeout_ms: 30000, 
                 connection_timeout_ms: 10000, 
                 max_connections: 10, 
-            }, 
+            },
+            wifi: WiFiConfig::default(),
+            transport: TransportConfig::default(),
             crypto: CryptoConfig {
                 key_rotation_interval_hours: 24,
                 message_ttl_seconds: 300,
@@ -998,7 +1019,7 @@ impl CryptoEngine {
 pub struct MessageRouter {
     device_id: DeviceId,
     crypto_engine: Arc<CryptoEngine>,
-    bluetooth_manager: Arc<BluetoothManager>,
+    transport_manager: Arc<TransportManager>,
     message_cache: Arc<RwLock<HashMap<Uuid, SystemTime>>>,
     routing_table: Arc<RwLock<HashMap<DeviceId, DeviceId>>>,
     neighbor_table: Arc<RwLock<HashMap<DeviceId, SystemTime>>>,
@@ -1020,14 +1041,14 @@ impl MessageRouter {
     pub fn new(
         device_id: DeviceId,
         crypto_engine: Arc<CryptoEngine>,
-        bluetooth_manager: Arc<BluetoothManager>,
+        transport_manager: Arc<TransportManager>,
         config: MeshConfig,
         crypto_config: CryptoConfig,
     ) -> Self {
         Self {
             device_id,
             crypto_engine,
-            bluetooth_manager,
+            transport_manager,
             message_cache: Arc::new(RwLock::new(HashMap::new())),
             routing_table: Arc::new(RwLock::new(HashMap::new())),
             neighbor_table: Arc::new(RwLock::new(HashMap::new())),
@@ -1075,7 +1096,7 @@ impl MessageRouter {
         let stats_clone2 = self.stats.clone();
         let message_cache_clone = self.message_cache.clone();
         let _routing_table_clone = self.routing_table.clone();
-        let bluetooth_manager_clone = self.bluetooth_manager.clone();
+        let transport_manager_clone = self.transport_manager.clone();
         
         let routing_update_task = async move {
             let mut interval = interval(Duration::from_millis(config_clone2.routing_update_interval_ms));
@@ -1126,9 +1147,9 @@ impl MessageRouter {
                             drop(cache);
 
                             // Forward to connected devices
-                            let connected_devices = bluetooth_manager_clone.get_connected_devices().await;
-                            for device_id in connected_devices.iter().take(3) {
-                                let _ = bluetooth_manager_clone.send_message(device_id, &encrypted_message).await;
+                            let connected_devices = transport_manager_clone.get_connected_devices().await;
+                            for connected_device in connected_devices.iter().take(3) {
+                                let _ = transport_manager_clone.send_message(&connected_device.device_id, &encrypted_message).await;
                             }
                             
                             stats_clone2.write().await.messages_sent += 1;
@@ -1266,22 +1287,23 @@ impl MessageRouter {
 
     async fn forward_message(&self, message: EncryptedMessage) -> Result<()> {
         let routing_table = self.routing_table.read().await;
-        let connected_devices = self.bluetooth_manager.get_connected_devices().await;
+        let connected_devices = self.transport_manager.get_connected_devices().await;
+        let device_ids: Vec<DeviceId> = connected_devices.iter().map(|d| d.device_id.clone()).collect();
 
         if let Some(recipient_id) = &message.header.recipient_id {
             // Try directed routing
             if let Some(next_hop) = routing_table.get(recipient_id) {
-                if connected_devices.contains(next_hop) {
-                    return self.bluetooth_manager.send_message(next_hop, &message).await;
+                if device_ids.contains(next_hop) {
+                    return self.transport_manager.send_message(next_hop, &message).await;
                 }
             }
         }
 
         // Fallback to selective flooding
         let mut sent_count = 0;
-        for device_id in connected_devices.iter().take(3) { // Limit flooding
+        for device_id in device_ids.iter().take(3) { // Limit flooding
             if device_id != &message.header.sender_id { // Don't send back to sender
-                if let Ok(()) = self.bluetooth_manager.send_message(device_id, &message).await {
+                if let Ok(()) = self.transport_manager.send_message(device_id, &message).await {
                     sent_count += 1;
                 }
             }
@@ -1385,7 +1407,7 @@ impl MessageRouter {
             .encrypt_message(&pong_content, Some(&ping_message.header.sender_id), pong_header)
             .await?;
 
-        self.bluetooth_manager
+        self.transport_manager
             .send_message(&ping_message.header.sender_id, &encrypted_pong)
             .await
     }
@@ -1421,7 +1443,7 @@ impl MessageRouter {
             .encrypt_message(&response_content, Some(&message.header.sender_id), response_header)
             .await?;
 
-        self.bluetooth_manager
+        self.transport_manager
             .send_message(&message.header.sender_id, &encrypted_response)
             .await
     }
@@ -1487,7 +1509,7 @@ pub struct SilentLink {
     config: SilentLinkConfiguration,
     device_id: DeviceId,
     ultrasonic_engine: UltrasonicEngine,
-    bluetooth_manager: Arc<BluetoothManager>,
+    transport_manager: Arc<TransportManager>,
     crypto_engine: Arc<CryptoEngine>,
     message_router: Arc<MessageRouter>,
     shared_secrets: Arc<RwLock<HashMap<String, SharedSecret>>>,
@@ -1508,8 +1530,13 @@ impl SilentLink {
             shared_secrets.clone(),
         );
         
-        let bluetooth_manager = Arc::new(
-            BluetoothManager::new(config.bluetooth.clone(), device_id.clone()).await?
+        // Create transport manager with WiFi fallback
+        let transport_manager = Arc::new(
+            TransportManager::new(
+                config.transport.clone(),
+                device_id.clone(),
+                config.device_name.clone(),
+            )
         );
         
         let crypto_engine = Arc::new(CryptoEngine::new(
@@ -1520,7 +1547,7 @@ impl SilentLink {
         let message_router = Arc::new(MessageRouter::new(
             device_id.clone(),
             crypto_engine.clone(),
-            bluetooth_manager.clone(),
+            transport_manager.clone(),
             config.mesh.clone(),
             config.crypto.clone(),
         ));
@@ -1540,7 +1567,7 @@ impl SilentLink {
             config,
             device_id,
             ultrasonic_engine,
-            bluetooth_manager,
+            transport_manager,
             crypto_engine,
             message_router,
             shared_secrets,
@@ -1579,25 +1606,25 @@ impl SilentLink {
 
         // Start all subsystems
         let ultrasonic_rx = self.ultrasonic_engine.start().await?;
-        let (bluetooth_device_rx, bluetooth_message_rx) = self.bluetooth_manager.start().await?;
+        let (transport_device_rx, transport_message_rx) = self.transport_manager.start().await?;
         self.message_router.start().await?;
 
         self.is_running.store(true, Ordering::Release);
 
         // Start main event loop
         let device_id = self.device_id.clone();
-        let bluetooth_manager = self.bluetooth_manager.clone();
+        let transport_manager = self.transport_manager.clone();
         let message_router = self.message_router.clone();
         let is_running = self.is_running.clone();
         
         let event_loop = SilentLinkEventLoop {
             device_id,
-            bluetooth_manager,
+            transport_manager,
             message_router,
             is_running,
             ultrasonic_rx,
-            bluetooth_device_rx,
-            bluetooth_message_rx,
+            transport_device_rx,
+            transport_message_rx,
         };
 
         tokio::spawn(event_loop.run());
@@ -1616,7 +1643,7 @@ impl SilentLink {
         self.is_running.store(false, Ordering::Release);
         
         self.ultrasonic_engine.stop().await;
-        self.bluetooth_manager.stop().await;
+        self.transport_manager.stop().await;
         
         info!("✅ SilentLink system stopped");
         Ok(())
@@ -1655,7 +1682,8 @@ impl SilentLink {
     }
 
     pub async fn get_connected_devices(&self) -> Vec<DeviceId> {
-        self.bluetooth_manager.get_connected_devices().await
+        self.transport_manager.get_connected_devices().await
+            .iter().map(|d| d.device_id.clone()).collect()
     }
 
     pub async fn get_network_stats(&self) -> NetworkStats {
@@ -1743,10 +1771,21 @@ impl SilentLink {
         info!("👂 Listening for ultrasonic beacons...");
         tokio::time::sleep(Duration::from_secs(30)).await;
 
-        // 2. Bluetooth LE passive scanning
-        info!("📡 Passive BLE scanning...");
-        let devices = self.bluetooth_manager.get_connected_devices().await;
-        info!("Found {} nearby devices", devices.len());
+        // 2. Transport passive scanning
+        info!("📡 Passive transport scanning...");
+        let connected_devices = self.transport_manager.get_connected_devices().await;
+        let transport_stats = self.transport_manager.get_transport_stats().await;
+        info!("Found {} connected devices via {:?} transport", connected_devices.len(), transport_stats.active_transport);
+        info!("📊 Transport stats: BT: {}/{}, WiFi: {}/{}", 
+              transport_stats.bluetooth_connections, transport_stats.bluetooth_discovered,
+              transport_stats.wifi_connections, transport_stats.wifi_discovered);
+        
+        // Display current transport preference
+        match transport_stats.active_transport {
+            TransportType::Bluetooth => info!("🔵 Active transport: Bluetooth LE"),
+            TransportType::WiFi => info!("🟢 Active transport: WiFi Direct"),
+            TransportType::Hybrid => info!("🟡 Active transport: Hybrid (BT + WiFi)"),
+        }
 
         // 3. Device vulnerability assessment
         info!("🎯 Analyzing device vulnerabilities...");
@@ -1790,12 +1829,12 @@ impl SilentLink {
 
 struct SilentLinkEventLoop {
     device_id: DeviceId,
-    bluetooth_manager: Arc<BluetoothManager>,
+    transport_manager: Arc<TransportManager>,
     message_router: Arc<MessageRouter>,
     is_running: Arc<AtomicBool>,
     ultrasonic_rx: mpsc::UnboundedReceiver<UltrasonicBeacon>,
-    bluetooth_device_rx: mpsc::UnboundedReceiver<DeviceId>,
-    bluetooth_message_rx: mpsc::UnboundedReceiver<EncryptedMessage>,
+    transport_device_rx: mpsc::UnboundedReceiver<DeviceId>,
+    transport_message_rx: mpsc::UnboundedReceiver<EncryptedMessage>,
 }
 
 impl SilentLinkEventLoop {
@@ -1815,17 +1854,17 @@ impl SilentLinkEventLoop {
                     }
                 }
 
-                // Handle BLE device discovery
-                device_id = self.bluetooth_device_rx.recv() => {
+                // Handle transport device discovery
+                device_id = self.transport_device_rx.recv() => {
                     if let Some(device_id) = device_id {
-                        if let Err(e) = self.handle_bluetooth_device_discovered(device_id).await {
-                            warn!("Error handling BLE device discovery: {}", e);
+                        if let Err(e) = self.handle_transport_device_discovered(device_id).await {
+                            warn!("Error handling transport device discovery: {}", e);
                         }
                     }
                 }
 
                 // Handle incoming messages
-                message = self.bluetooth_message_rx.recv() => {
+                message = self.transport_message_rx.recv() => {
                     if let Some(message) = message {
                         if let Err(e) = self.handle_incoming_message(message).await {
                             warn!("Error handling incoming message: {}", e);
@@ -1861,15 +1900,15 @@ impl SilentLinkEventLoop {
             return Ok(());
         }
 
-        // Attempt BLE connection
+        // Attempt transport connection
         if let Err(e) = self
-            .bluetooth_manager
+            .transport_manager
             .connect_to_device(beacon.device_id.clone())
             .await
         {
-            debug!("Could not establish BLE connection to {}: {}", beacon.device_id, e);
+            debug!("Could not establish transport connection to {}: {}", beacon.device_id, e);
         } else {
-            info!("📶 Established BLE connection via ultrasonic discovery to {}", beacon.device_id);
+            info!("📶 Established transport connection via ultrasonic discovery to {}", beacon.device_id);
             
             // Send handshake request
             let _ = self.message_router.send_message(
@@ -1883,12 +1922,12 @@ impl SilentLinkEventLoop {
         Ok(())
     }
 
-    async fn handle_bluetooth_device_discovered(&self, device_id: DeviceId) -> Result<()> {
-        info!("📱 Discovered BLE device: {}", device_id);
+    async fn handle_transport_device_discovered(&self, device_id: DeviceId) -> Result<()> {
+        info!("📱 Discovered transport device: {}", device_id);
         
         // Attempt connection
         if let Err(e) = self
-            .bluetooth_manager
+            .transport_manager
             .connect_to_device(device_id.clone())
             .await
         {
@@ -1908,8 +1947,8 @@ impl SilentLinkEventLoop {
     async fn perform_cleanup(&self) -> Result<()> {
         debug!("🧹 Performing periodic cleanup");
         
-        // Cleanup stale BLE connections
-        self.bluetooth_manager.cleanup_stale_connections().await?;
+        // Cleanup would be handled by the transport manager
+        // No direct cleanup needed here since transport manager handles it
         
         Ok(())
     }
@@ -2019,9 +2058,9 @@ impl QrHandshake {
             }
         }
 
-        // Attempt BLE connection
+        // Attempt connection via transport manager
         self.silentlink
-            .bluetooth_manager
+            .transport_manager
             .connect_to_device(device_id.clone())
             .await?;
 
