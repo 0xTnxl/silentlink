@@ -219,7 +219,7 @@ impl PlatformAdapter for AndroidAdapter {
             }
         }
 
-        println!("📱 [Android] Intent sent to {} with action {}", component, action);
+        println!("[Android] Intent sent to {} with action {}", component, action);
         Ok(())
     }
 
@@ -267,7 +267,7 @@ impl PlatformAdapter for AndroidAdapter {
             }
         }
 
-        println!("🔔 [Android] Notification created for {}: {} - {}", app_package, title, content);
+        println!("[Android] Notification created for {}: {} - {}", app_package, title, content);
         Ok(())
     }
 
@@ -550,7 +550,7 @@ impl PlatformAdapter for IOSAdapter {
     }
 
     async fn create_notification(&self, app_package: &str, title: &str, content: &str) -> Result<()> {
-        println!("🍎 [iOS] Creating notification for {}: {} - {}", app_package, title, content);
+        println!("[iOS] Creating notification for {}: {} - {}", app_package, title, content);
         Ok(())
     }
 
@@ -766,7 +766,7 @@ impl PlatformAdapter for DesktopAdapter {
             }
         }
 
-        println!("🖥️ [Desktop] Sent message to {} with action {}", component, action);
+        println!("[Desktop] Sent message to {} with action {}", component, action);
         Ok(())
     }
 
@@ -806,7 +806,7 @@ impl PlatformAdapter for DesktopAdapter {
                 .map_err(|e| SilentLinkError::System(format!("D-Bus notification failed: {}", e)))?;
         }
 
-        println!("🔔 [Desktop] Notification created for {}: {} - {}", app_package, title, content);
+        println!("[Desktop] Notification created for {}: {} - {}", app_package, title, content);
         Ok(())
     }
 
@@ -837,7 +837,7 @@ impl PlatformAdapter for DesktopAdapter {
                                     config_json[key] = serde_json::Value::String(value.to_string());
                                     if let Ok(new_contents) = serde_json::to_string_pretty(&config_json) {
                                         let _ = tokio::fs::write(&full_path, new_contents).await;
-                                        println!("💾 [Desktop] Modified {} config: {} = {}", app_package, key, value);
+                                        println!("[Desktop] Modified {} config: {} = {}", app_package, key, value);
                                         return Ok(());
                                     }
                                 }
@@ -1074,6 +1074,11 @@ impl AudioStreamManager {
     pub fn set_streams(&mut self, input: cpal::Stream, output: cpal::Stream) {
         self._input_stream = Some(input);
         self._output_stream = Some(output);
+    }
+
+    pub fn set_input_stream(&mut self, input: cpal::Stream) {
+        self._input_stream = Some(input);
+        self._output_stream = None;
     }
 
     pub fn stop_streams(&mut self) {

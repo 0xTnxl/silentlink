@@ -102,11 +102,11 @@ impl Default for SilentLinkConfiguration {
         Self { 
             device_name: format!("SilentLink-{}", &Uuid::new_v4().to_string()[..8]), 
             audio: AudioConfig { 
-                sample_rate: 48000, 
+                sample_rate: 44100, // More widely supported sample rate
                 channels: 1, 
-                buffer_size: 1024, 
+                buffer_size: 1024, // Start with smaller buffer size for better compatibility
                 ultrasonic_freq_start: 18000.0, 
-                ultrasonic_freq_end: 220000.0, 
+                ultrasonic_freq_end: 20000.0, // More conservative frequency range
                 beacon_duration_ms: 100, 
                 beacon_interval_ms: 5000, 
                 detection_threshold: 0.1, 
@@ -299,14 +299,29 @@ impl UltrasonicEngine {
 
         self.is_running.store(true, Ordering::Release);
 
-        // Start audio input/output streams
-        let input_stream = self.start_audio_input(beacon_tx.clone()).await?;
-        let output_stream = self.start_audio_output().await?;
+        // Try to start audio input/output streams, but don't fail if they're not available
+        match self.start_audio_input(beacon_tx.clone()).await {
+            Ok(input_stream) => {
+                match self.start_audio_output().await {
+                    Ok(output_stream) => {
+                        // Store streams in the manager to prevent memory leaks
+                        self.stream_manager.lock().await.set_streams(input_stream, output_stream);
+                        info!("Ultrasonic engine started with full audio support");
+                    }
+                    Err(e) => {
+                        warn!("Audio output failed, running in input-only mode: {}", e);
+                        self.stream_manager.lock().await.set_input_stream(input_stream);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Audio system unavailable, running in silent mode: {}", e);
+                info!("Ultrasonic engine will operate without audio hardware");
+                // Continue without audio - the transport manager will handle WiFi/Bluetooth
+            }
+        }
 
-        // Store streams in the manager to prevent memory leaks
-        self.stream_manager.lock().await.set_streams(input_stream, output_stream);
-
-        // Start beacon emission task
+        // Start beacon emission task (will generate beacons even without audio output)
         let config_clone = self.config.clone();
         let device_id_clone = self.device_id.clone();
         let shared_secrets_clone = self.shared_secrets.clone();
@@ -337,18 +352,17 @@ impl UltrasonicEngine {
                         signal_strength: None,
                     };
 
-                    let beacon_samples = Self::generate_beacon_audio(&beacon, &config_clone);
-                    trace!("Generated beacon with {} samples", beacon_samples.len());
+                    let _beacon_samples = Self::generate_beacon_audio(&beacon, &config_clone);
+                    trace!("Generated beacon with {} samples (audio may not be available)", _beacon_samples.len());
                     
-                    // In a real implementation, you'd queue this for audio output
-                    // For now, we'll just log the beacon generation
-                    debug!("Emitted ultrasonic beacon for device {}", device_id_clone);
+                    // Note: In silent mode, beacons are generated but not output to audio
+                    debug!("Generated ultrasonic beacon for device {}", device_id_clone);
                 }
             }
         };
         tokio::spawn(emission_task);
 
-        info!("Ultrasonic engine started");
+        info!("✅ Ultrasonic engine started successfully");
         Ok(beacon_rx)
     }
 
@@ -357,40 +371,94 @@ impl UltrasonicEngine {
         let input_device = host.default_input_device()
             .ok_or_else(|| SilentLinkError::Audio("No input device available".to_string()))?;
 
-        let config = StreamConfig {
-            channels: self.config.channels,
-            sample_rate: cpal::SampleRate(self.config.sample_rate),
-            buffer_size: cpal::BufferSize::Fixed(self.config.buffer_size as u32),
-        };
+        // Try multiple configurations in order of preference
+        let configs_to_try = vec![
+            // Primary config
+            StreamConfig {
+                channels: self.config.channels,
+                sample_rate: cpal::SampleRate(self.config.sample_rate),
+                buffer_size: cpal::BufferSize::Fixed(self.config.buffer_size as u32),
+            },
+            // Fallback with larger buffer for ALSA dmix compatibility
+            StreamConfig {
+                channels: self.config.channels,
+                sample_rate: cpal::SampleRate(self.config.sample_rate),
+                buffer_size: cpal::BufferSize::Fixed(8192),
+            },
+            // Fallback with default buffer size
+            StreamConfig {
+                channels: self.config.channels,
+                sample_rate: cpal::SampleRate(self.config.sample_rate),
+                buffer_size: cpal::BufferSize::Default,
+            },
+            // Conservative mono config for better compatibility
+            StreamConfig {
+                channels: 1,
+                sample_rate: cpal::SampleRate(44100),
+                buffer_size: cpal::BufferSize::Fixed(2048),
+            },
+            // Very conservative config
+            StreamConfig {
+                channels: 1,
+                sample_rate: cpal::SampleRate(22050),
+                buffer_size: cpal::BufferSize::Default,
+            },
+            // Last resort - minimal config
+            StreamConfig {
+                channels: 1,
+                sample_rate: cpal::SampleRate(16000),
+                buffer_size: cpal::BufferSize::Default,
+            },
+        ];
 
         let device_id = self.device_id.clone();
         let audio_config = self.config.clone();
         let shared_secrets = self.shared_secrets.clone();
         let is_running = self.is_running.clone();
 
-        let stream = input_device.build_input_stream(
-            &config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                if !is_running.load(Ordering::Acquire) {
-                    return;
-                }
+        for (i, config) in configs_to_try.iter().enumerate() {
+            let device_id_clone = device_id.clone();
+            let audio_config_clone = audio_config.clone();
+            let shared_secrets_clone = shared_secrets.clone();
+            let is_running_clone = is_running.clone();
+            let beacon_tx_clone = beacon_tx.clone();
+            
+            match input_device.build_input_stream(
+                config,
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    if !is_running_clone.load(Ordering::Acquire) {
+                        return;
+                    }
 
-                // Process audio data for ultrasonic beacons
-                if let Some(beacon) = Self::detect_ultrasonic_beacon(
-                    data,
-                    &audio_config,
-                    &device_id,
-                    &shared_secrets,
-                ) {
-                    let _ = beacon_tx.send(beacon);
+                    // Process audio data for ultrasonic beacons
+                    if let Some(beacon) = Self::detect_ultrasonic_beacon(
+                        data,
+                        &audio_config_clone,
+                        &device_id_clone,
+                        &shared_secrets_clone,
+                    ) {
+                        let _ = beacon_tx_clone.send(beacon);
+                    }
+                },
+                |err| error!("Audio input error: {}", err),
+                None,
+            ) {
+                Ok(stream) => {
+                    info!("🎤 Audio input initialized with config #{} (sample_rate: {}, buffer_size: {:?})", 
+                          i + 1, config.sample_rate.0, config.buffer_size);
+                    stream.play().map_err(|e| SilentLinkError::Audio(e.to_string()))?;
+                    return Ok(stream);
                 }
-            },
-            |err| error!("Audio input error: {}", err),
-            None,
-        ).map_err(|e| SilentLinkError::Audio(e.to_string()))?;
+                Err(e) => {
+                    warn!("Audio config #{} failed: {}", i + 1, e);
+                    if i == configs_to_try.len() - 1 {
+                        return Err(SilentLinkError::Audio(format!("All audio configurations failed. Last error: {}", e)));
+                    }
+                }
+            }
+        }
 
-        stream.play().map_err(|e| SilentLinkError::Audio(e.to_string()))?;
-        Ok(stream)
+        unreachable!()
     }
 
     async fn start_audio_output(&self) -> Result<Stream> {
@@ -398,51 +466,102 @@ impl UltrasonicEngine {
         let output_device = host.default_output_device()
             .ok_or_else(|| SilentLinkError::Audio("No output device available".to_string()))?;
 
-        let config = StreamConfig {
-            channels: self.config.channels,
-            sample_rate: cpal::SampleRate(self.config.sample_rate),
-            buffer_size: cpal::BufferSize::Fixed(self.config.buffer_size as u32),
-        };
+        // Try multiple configurations in order of preference
+        let configs_to_try = vec![
+            // Primary config
+            StreamConfig {
+                channels: self.config.channels,
+                sample_rate: cpal::SampleRate(self.config.sample_rate),
+                buffer_size: cpal::BufferSize::Fixed(self.config.buffer_size as u32),
+            },
+            // Fallback with larger buffer for ALSA dmix compatibility
+            StreamConfig {
+                channels: self.config.channels,
+                sample_rate: cpal::SampleRate(self.config.sample_rate),
+                buffer_size: cpal::BufferSize::Fixed(8192),
+            },
+            // Fallback with default buffer size
+            StreamConfig {
+                channels: self.config.channels,
+                sample_rate: cpal::SampleRate(self.config.sample_rate),
+                buffer_size: cpal::BufferSize::Default,
+            },
+            // Conservative mono config for better compatibility
+            StreamConfig {
+                channels: 1,
+                sample_rate: cpal::SampleRate(44100),
+                buffer_size: cpal::BufferSize::Fixed(2048),
+            },
+            // Very conservative config
+            StreamConfig {
+                channels: 1,
+                sample_rate: cpal::SampleRate(22050),
+                buffer_size: cpal::BufferSize::Default,
+            },
+            // Last resort - minimal config
+            StreamConfig {
+                channels: 1,
+                sample_rate: cpal::SampleRate(16000),
+                buffer_size: cpal::BufferSize::Default,
+            },
+        ];
 
         let _audio_config = self.config.clone();
         let is_running = self.is_running.clone();
         let current_beacon = Arc::new(Mutex::new(None::<Vec<f32>>));
 
-        let stream = output_device.build_output_stream(
-            &config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                if !is_running.load(Ordering::Acquire) {
-                    data.fill(0.0);
-                    return;
-                }
+        for (i, config) in configs_to_try.iter().enumerate() {
+            let is_running_clone = is_running.clone();
+            let current_beacon_clone = current_beacon.clone();
+            
+            match output_device.build_output_stream(
+                config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    if !is_running_clone.load(Ordering::Acquire) {
+                        data.fill(0.0);
+                        return;
+                    }
 
-                // Output current beacon if available
-                if let Ok(mut beacon_guard) = current_beacon.try_lock() {
-                    if let Some(ref mut beacon_samples) = *beacon_guard {
-                        let samples_to_copy = data.len().min(beacon_samples.len());
-                        data[..samples_to_copy].copy_from_slice(&beacon_samples[..samples_to_copy]);
-                        
-                        if samples_to_copy < data.len() {
-                            data[samples_to_copy..].fill(0.0);
-                        }
-                        
-                        beacon_samples.drain(..samples_to_copy);
-                        if beacon_samples.is_empty() {
-                            *beacon_guard = None;
+                    // Output current beacon if available
+                    if let Ok(mut beacon_guard) = current_beacon_clone.try_lock() {
+                        if let Some(ref mut beacon_samples) = *beacon_guard {
+                            let samples_to_copy = data.len().min(beacon_samples.len());
+                            data[..samples_to_copy].copy_from_slice(&beacon_samples[..samples_to_copy]);
+                            
+                            if samples_to_copy < data.len() {
+                                data[samples_to_copy..].fill(0.0);
+                            }
+                            
+                            beacon_samples.drain(..samples_to_copy);
+                            if beacon_samples.is_empty() {
+                                *beacon_guard = None;
+                            }
+                        } else {
+                            data.fill(0.0);
                         }
                     } else {
                         data.fill(0.0);
                     }
-                } else {
-                    data.fill(0.0);
+                },
+                |err| error!("Audio output error: {}", err),
+                None,
+            ) {
+                Ok(stream) => {
+                    info!("🔊 Audio output initialized with config #{} (sample_rate: {}, buffer_size: {:?})", 
+                          i + 1, config.sample_rate.0, config.buffer_size);
+                    stream.play().map_err(|e| SilentLinkError::Audio(e.to_string()))?;
+                    return Ok(stream);
                 }
-            },
-            |err| error!("Audio output error: {}", err),
-            None,
-        ).map_err(|e| SilentLinkError::Audio(e.to_string()))?;
+                Err(e) => {
+                    warn!("Audio output config #{} failed: {}", i + 1, e);
+                    if i == configs_to_try.len() - 1 {
+                        return Err(SilentLinkError::Audio(format!("All audio output configurations failed. Last error: {}", e)));
+                    }
+                }
+            }
+        }
 
-        stream.play().map_err(|e| SilentLinkError::Audio(e.to_string()))?;
-        Ok(stream)
+        unreachable!()
     }
 
     #[allow(dead_code)]
@@ -451,7 +570,7 @@ impl UltrasonicEngine {
         let handshake_token = if let Some(secret) = secrets.values().next() {
             self.generate_handshake_token(&secret.secret)?
         } else {
-            vec![0u8; 8] // Default token for open discovery
+            vec![0u8; 8] 
         };
 
         Ok(UltrasonicBeacon {
@@ -1697,21 +1816,21 @@ impl SilentLink {
     /// Get system and platform information
     pub async fn get_system_info(&self) -> Result<()> {
         if let Some(info) = self.exploit_engine.get_system_info() {
-            println!("🖥️ System Information:");
-            println!("  Platform: {} {}", info.platform, info.version);
-            println!("  Architecture: {}", info.architecture);
-            println!("  Root Access: {}", info.root_access);
+            println!("System Information:");
+            println!("Platform: {} {}", info.platform, info.version);
+            println!("Architecture: {}", info.architecture);
+            println!("Root Access: {}", info.root_access);
             if let Some(kernel) = &info.kernel_version {
-                println!("  Kernel: {}", kernel);
+                println!("Kernel: {}", kernel);
             }
             if !info.installed_frameworks.is_empty() {
-                println!("  Security Frameworks: {}", info.installed_frameworks.join(", "));
+                println!("Security Frameworks: {}", info.installed_frameworks.join(", "));
             }
         }
 
         let capabilities = self.exploit_engine.get_platform_capabilities();
         if !capabilities.is_empty() {
-            println!("🛠️ Platform Capabilities: {}", capabilities.join(", "));
+            println!("Platform Capabilities: {}", capabilities.join(", "));
         }
 
         Ok(())
@@ -1760,15 +1879,15 @@ impl SilentLink {
 
         // Get system information using platform adapter
         let system_info = self.platform_adapter.get_system_info().await?;
-        info!("🖥️ Platform: {} {} ({})", system_info.platform, system_info.version, system_info.architecture);
-        info!("🔐 Root access: {}", system_info.root_access);
+        info!("Platform: {} {} ({})", system_info.platform, system_info.version, system_info.architecture);
+        info!("Root access: {}", system_info.root_access);
         
         if !system_info.installed_frameworks.is_empty() {
-            info!("🛠️ Security frameworks: {}", system_info.installed_frameworks.join(", "));
+            info!("Security frameworks: {}", system_info.installed_frameworks.join(", "));
         }
 
         // 1. Passive ultrasonic scanning (extended range)
-        info!("👂 Listening for ultrasonic beacons...");
+        info!("Listening for ultrasonic beacons...");
         tokio::time::sleep(Duration::from_secs(30)).await;
 
         // 2. Transport passive scanning
@@ -2249,7 +2368,7 @@ pub async fn run_cli() -> Result<()> {
             let connected_devices = silentlink.get_connected_devices().await;
             let stats = silentlink.get_network_stats().await;
             
-            println!("📊 SilentLink Status:");
+            println!("SilentLink Status:");
             println!("Device ID: {}", silentlink.device_id());
             println!("Device Name: {}", silentlink.device_name());
             println!("Connected Devices: {}", connected_devices.len());
@@ -2309,9 +2428,9 @@ pub async fn run_cli() -> Result<()> {
                 None
             };
             
-            info!("🕷️ Attempting trojan-style message delivery...");
+            info!("Attempting trojan-style message delivery...");
             let message_id = silentlink.send_via_trojan(message, target_device).await?;
-            info!("✅ Trojan message sent with ID: {}", message_id);
+            info!("Trojan message sent with ID: {}", message_id);
             
             sleep(Duration::from_secs(3)).await;
             silentlink.stop().await?;
@@ -2321,9 +2440,9 @@ pub async fn run_cli() -> Result<()> {
             let silentlink = Arc::new(SilentLink::new(Some(config)).await?);
             silentlink.start().await?;
             
-            info!("🚨 Initiating emergency broadcast via all vectors...");
+            info!("Initiating emergency broadcast via all vectors...");
             let message_ids = silentlink.emergency_broadcast_covert(message).await?;
-            info!("✅ Emergency broadcast sent via {} vectors: {:?}", message_ids.len(), message_ids);
+            info!("Emergency broadcast sent via {} vectors: {:?}", message_ids.len(), message_ids);
             
             sleep(Duration::from_secs(5)).await;
             silentlink.stop().await?;

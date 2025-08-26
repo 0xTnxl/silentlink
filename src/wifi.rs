@@ -147,18 +147,44 @@ impl WiFiManager {
         let (device_tx, device_rx) = mpsc::unbounded_channel();
         let (message_tx, message_rx) = mpsc::unbounded_channel();
 
-        // Start TCP listener for incoming connections
-        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.config.p2p_port);
-        self.tcp_listener = Some(TcpListener::bind(bind_addr).await?);
+        // Try to bind to the configured port, with fallback ports if needed
+        let mut port_to_try = self.config.p2p_port;
+        let mut listener = None;
         
-        info!("🔊 WiFi listener started on port {}", self.config.p2p_port);
+        for attempt in 0..5 {
+            let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port_to_try);
+            match TcpListener::bind(bind_addr).await {
+                Ok(tcp_listener) => {
+                    info!("🔊 WiFi listener started on port {}", port_to_try);
+                    if port_to_try != self.config.p2p_port {
+                        warn!("Using fallback port {} instead of configured port {}", 
+                              port_to_try, self.config.p2p_port);
+                        // Update config to reflect actual port
+                        self.config.p2p_port = port_to_try;
+                    }
+                    listener = Some(tcp_listener);
+                    break;
+                }
+                Err(e) => {
+                    if attempt < 4 {
+                        warn!("Port {} in use, trying port {} (attempt {}/5)", 
+                              port_to_try, port_to_try + 1, attempt + 1);
+                        port_to_try += 1;
+                    } else {
+                        return Err(SilentLinkError::Network(format!(
+                            "Failed to bind to any port after {} attempts. Last error: {}", 
+                            attempt + 1, e
+                        )));
+                    }
+                }
+            }
+        }
 
+        self.tcp_listener = listener;
         self.is_running.store(true, Ordering::Release);
 
         // Start connection acceptor task
-        if let Some(listener) = &self.tcp_listener {
-            // Clone the listener handle rather than the listener itself
-            let bind_addr = listener.local_addr()?;
+        if let Some(listener) = self.tcp_listener.take() {
             let device_id = self.device_id.clone();
             let device_name = self.device_name.clone();
             let active_connections = self.active_connections.clone();
@@ -167,18 +193,15 @@ impl WiFiManager {
             let message_tx_clone = message_tx.clone();
 
             tokio::spawn(async move {
-                // Create a new listener with the same address
-                if let Ok(listener_clone) = TcpListener::bind(bind_addr).await {
-                    Self::accept_connections(
-                        listener_clone,
-                        device_id,
-                        device_name,
-                        active_connections,
-                        is_running,
-                        device_tx_clone,
-                        message_tx_clone,
-                    ).await;
-                }
+                Self::accept_connections(
+                    listener,
+                    device_id,
+                    device_name,
+                    active_connections,
+                    is_running,
+                    device_tx_clone,
+                    message_tx_clone,
+                ).await;
             });
         }
 
@@ -375,16 +398,45 @@ impl WiFiManager {
     }
 
     async fn start_peer_discovery(&self, device_tx: mpsc::UnboundedSender<DeviceId>) -> Result<()> {
-        let discovery_port = self.config.discovery_port;
+        let mut discovery_port = self.config.discovery_port;
+        let original_discovery_port = self.config.discovery_port;
         let discovered_peers = self.discovered_peers.clone();
         let is_running = self.is_running.clone();
         let own_device_id = self.device_id.clone();
 
         tokio::spawn(async move {
-            let socket = match tokio::net::UdpSocket::bind(format!("0.0.0.0:{}", discovery_port)).await {
-                Ok(s) => s,
-                Err(e) => {
-                    error!("Failed to bind discovery socket: {}", e);
+            let mut socket = None;
+            
+            // Try to bind to discovery port with fallback
+            for attempt in 0..5 {
+                match tokio::net::UdpSocket::bind(format!("0.0.0.0:{}", discovery_port)).await {
+                    Ok(s) => {
+                        info!("👂 WiFi peer discovery listening on port {}", discovery_port);
+                        if discovery_port != original_discovery_port {
+                            warn!("Using fallback discovery port {} instead of configured port {}", 
+                                  discovery_port, original_discovery_port);
+                        }
+                        socket = Some(s);
+                        break;
+                    }
+                    Err(e) => {
+                        if attempt < 4 {
+                            warn!("Discovery port {} in use, trying port {} (attempt {}/5)", 
+                                  discovery_port, discovery_port + 1, attempt + 1);
+                            discovery_port += 1;
+                        } else {
+                            error!("Failed to bind discovery socket after {} attempts. Last error: {}", 
+                                   attempt + 1, e);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            let socket = match socket {
+                Some(s) => s,
+                None => {
+                    error!("Failed to create discovery socket");
                     return;
                 }
             };
