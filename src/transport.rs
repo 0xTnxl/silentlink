@@ -143,7 +143,7 @@ impl TransportManager {
         // Try to initialize Bluetooth
         match BluetoothManager::new(self.config.bluetooth.clone(), self.device_id.clone()).await {
             Ok(bt_manager) => {
-                info!("📶 Bluetooth transport initialized");
+                info!("Bluetooth transport initialized");
                 *self.bluetooth_manager.write().await = Some(bt_manager);
                 available_transports.push(TransportType::Bluetooth);
             }
@@ -155,12 +155,12 @@ impl TransportManager {
         // Try to initialize WiFi
         match WiFiManager::new(self.config.wifi.clone(), self.device_id.clone(), self.device_name.clone()).await {
             Ok(wifi_manager) => {
-                info!("📡 WiFi transport initialized for device: {}", self.device_name);
+                info!("WiFi transport initialized for device: {}", self.device_name);
                 *self.wifi_manager.write().await = Some(wifi_manager);
                 available_transports.push(TransportType::WiFi);
             }
             Err(e) => {
-                warn!("⚠️  WiFi initialization failed: {}", e);
+                warn!("WiFi initialization failed: {}", e);
             }
         }
 
@@ -172,8 +172,8 @@ impl TransportManager {
         let initial_transport = self.choose_initial_transport(&available_transports).await;
         *self.active_transport.write().await = initial_transport;
 
-        info!("✅ Transport manager initialized with {:?} transports", available_transports);
-        info!("🎯 Active transport: {:?}", initial_transport);
+        info!("Transport manager initialized with {:?} transports", available_transports);
+        info!("Active transport: {:?}", initial_transport);
 
         Ok(())
     }
@@ -223,7 +223,7 @@ impl TransportManager {
             return Err(SilentLinkError::System("Transport manager already running".to_string()));
         }
 
-        info!("🚀 Starting Transport Manager for device: {}", self.device_name);
+        info!("Starting Transport Manager for device: {}", self.device_name);
 
         // Initialize transports if not already done
         self.initialize_transports().await?;
@@ -248,7 +248,7 @@ impl TransportManager {
         // Start device aggregation
         self.start_device_aggregator().await?;
 
-        info!("✅ Transport Manager started successfully");
+        info!("Transport Manager started successfully");
         Ok((device_rx, message_rx))
     }
 
@@ -260,14 +260,14 @@ impl TransportManager {
                 if let Some(bt_manager) = self.bluetooth_manager.write().await.as_mut() {
                     let (bt_device_rx, bt_message_rx) = bt_manager.start().await?;
                     self.forward_bluetooth_events(bt_device_rx, bt_message_rx).await;
-                    info!("🔵 Bluetooth transport started");
+                    info!("Bluetooth transport started");
                 }
             }
             TransportType::WiFi => {
                 if let Some(wifi_manager) = self.wifi_manager.write().await.as_mut() {
                     let (wifi_device_rx, wifi_message_rx) = wifi_manager.start().await?;
                     self.forward_wifi_events(wifi_device_rx, wifi_message_rx).await;
-                    info!("🟢 WiFi transport started");
+                    info!("WiFi transport started");
                 }
             }
             TransportType::Hybrid => {
@@ -275,12 +275,12 @@ impl TransportManager {
                 if let Some(bt_manager) = self.bluetooth_manager.write().await.as_mut() {
                     let (bt_device_rx, bt_message_rx) = bt_manager.start().await?;
                     self.forward_bluetooth_events(bt_device_rx, bt_message_rx).await;
-                    info!("🔵 Bluetooth transport started (hybrid mode)");
+                    info!("Bluetooth transport started (hybrid mode)");
                 }
                 if let Some(wifi_manager) = self.wifi_manager.write().await.as_mut() {
                     let (wifi_device_rx, wifi_message_rx) = wifi_manager.start().await?;
                     self.forward_wifi_events(wifi_device_rx, wifi_message_rx).await;
-                    info!("🟢 WiFi transport started (hybrid mode)");
+                    info!("WiFi transport started (hybrid mode)");
                 }
             }
         }
@@ -442,11 +442,11 @@ impl TransportManager {
                     // Start new transport
                     match new_transport {
                         TransportType::Bluetooth => {
-                            info!("🔵 Starting Bluetooth transport");
+                            info!("Starting Bluetooth transport");
                             // Bluetooth is already running, just prioritize it
                         }
                         TransportType::WiFi => {
-                            info!("📶 Starting WiFi transport");
+                            info!("Starting WiFi transport");
                             // WiFi is already running, just prioritize it
                         }
                         _ => {}
@@ -491,7 +491,7 @@ impl TransportManager {
 
                 devices.retain(|device_id, device| {
                     if device.last_activity < cutoff {
-                        debug!("🧹 Removing stale device: {} ({})", device_id, device.transport);
+                        debug!("Removing stale device: {} ({})", device_id, device.transport);
                         false
                     } else {
                         true
@@ -636,7 +636,7 @@ impl TransportManager {
             return Ok(());
         }
 
-        info!("🔄 Forcing transport switch to {:?}", transport);
+        info!("Forcing transport switch to {:?}", transport);
         
         // Stop current transport gracefully
         let current = *self.active_transport.read().await;
@@ -661,13 +661,13 @@ impl TransportManager {
         // Start new transport if needed
         match transport {
             TransportType::Bluetooth => {
-                info!("🔵 Switched to Bluetooth transport");
+                info!("Switched to Bluetooth transport");
             }
             TransportType::WiFi => {
-                info!("📶 Switched to WiFi transport");
+                info!("Switched to WiFi transport");
             }
             TransportType::Hybrid => {
-                info!("🔄 Switched to Hybrid transport mode");
+                info!("Switched to Hybrid transport mode");
             }
         }
 
@@ -675,7 +675,7 @@ impl TransportManager {
     }
 
     pub async fn stop(&self) {
-        info!("🛑 Stopping Transport Manager");
+        info!("Stopping Transport Manager");
         self.is_running.store(false, Ordering::Release);
 
         if let Some(ref bt_manager) = *self.bluetooth_manager.read().await {
@@ -687,7 +687,7 @@ impl TransportManager {
         }
 
         self.connected_devices.write().await.clear();
-        info!("✅ Transport Manager stopped");
+        info!("Transport Manager stopped");
     }
 
     pub async fn get_wifi_connection_info(&self, device_id: &DeviceId) -> Option<(std::net::SocketAddr, std::time::SystemTime)> {
@@ -708,11 +708,11 @@ impl TransportManager {
 
     /// Establish high-bandwidth connection to a discovered device
     pub async fn establish_connection(&self, target_device_id: &DeviceId) -> Result<()> {
-        info!("🔗 Attempting to establish high-bandwidth connection to {}", target_device_id);
+        info!("Attempting to establish high-bandwidth connection to {}", target_device_id);
         
         // Check if already connected
         if self.connected_devices.read().await.contains_key(target_device_id) {
-            info!("✅ Already connected to {}", target_device_id);
+            info!("Already connected to {}", target_device_id);
             return Ok(());
         }
 
@@ -724,7 +724,7 @@ impl TransportManager {
                 if let Some(ref wifi_manager) = *self.wifi_manager.read().await {
                     match wifi_manager.connect_to_peer(target_device_id).await {
                         Ok(()) => {
-                            info!("📡 WiFi connection established to {}", target_device_id);
+                            info!("WiFi connection established to {}", target_device_id);
                             
                             // Add to connected devices
                             let device = ConnectedDevice {
@@ -763,7 +763,7 @@ impl TransportManager {
             if let Some(ref bt_manager) = *self.bluetooth_manager.read().await {
                 match bt_manager.connect_to_device(target_device_id.clone()).await {
                     Ok(()) => {
-                        info!("🔵 Bluetooth connection established to {}", target_device_id);
+                        info!("Bluetooth connection established to {}", target_device_id);
                         
                         // Add to connected devices
                         let device = ConnectedDevice {
