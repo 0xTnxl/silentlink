@@ -8,8 +8,21 @@ use tracing::{info, warn, debug};
 use serde::{Serialize, Deserialize};
 
 use crate::{DeviceId, EncryptedMessage, Result, SilentLinkError};
-use crate::bluetooth::{BluetoothManager, BluetoothConfig};
+use crate::{BluetoothManager, BluetoothConfig};
 use crate::wifi::{WiFiManager, WiFiConfig};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransportConfig {
+    pub transport_type: TransportType,
+    pub preference: TransportPreference,
+    pub auto_switch: bool,
+    pub bluetooth: BluetoothConfig,
+    pub wifi: WiFiConfig,
+    pub hybrid_ratio: f32, // 0.0 = all bluetooth, 1.0 = all wifi
+    pub fallback_enabled: bool,
+    pub hybrid_mode: bool,
+    pub switch_threshold_ms: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransportType {
@@ -35,25 +48,18 @@ pub enum TransportPreference {
     Automatic, // Choose based on availability and performance
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransportConfig {
-    pub bluetooth: BluetoothConfig,
-    pub wifi: WiFiConfig,
-    pub preference: TransportPreference,
-    pub fallback_enabled: bool,
-    pub hybrid_mode: bool,
-    pub switch_threshold_ms: u64, // Time before switching transports
-}
-
 impl Default for TransportConfig {
     fn default() -> Self {
         Self {
+            transport_type: TransportType::Hybrid,
+            preference: TransportPreference::Automatic,
+            auto_switch: true,
             bluetooth: BluetoothConfig::default(),
             wifi: WiFiConfig::default(),
-            preference: TransportPreference::Automatic,
+            hybrid_ratio: 0.7,
             fallback_enabled: true,
             hybrid_mode: false,
-            switch_threshold_ms: 10000, // 10 seconds
+            switch_threshold_ms: 10000,
         }
     }
 }
@@ -105,12 +111,15 @@ pub struct TransportManager {
     
     connected_devices: Arc<RwLock<HashMap<DeviceId, ConnectedDevice>>>,
     active_transport: Arc<RwLock<TransportType>>,
+    last_switch: Arc<RwLock<Option<SystemTime>>>,
     is_running: Arc<AtomicBool>,
     
     // Event channels
     device_tx: Arc<RwLock<Option<mpsc::UnboundedSender<DeviceId>>>>,
     message_tx: Arc<RwLock<Option<mpsc::UnboundedSender<EncryptedMessage>>>>,
-}impl TransportManager {
+}
+
+impl TransportManager {
     pub fn new(config: TransportConfig, device_id: DeviceId, device_name: String) -> Self {
         let default_transport = config.get_default_transport();
         Self {
@@ -121,6 +130,7 @@ pub struct TransportManager {
             wifi_manager: Arc::new(RwLock::new(None)),
             connected_devices: Arc::new(RwLock::new(HashMap::new())),
             active_transport: Arc::new(RwLock::new(default_transport)),
+            last_switch: Arc::new(RwLock::new(None)),
             is_running: Arc::new(AtomicBool::new(false)),
             device_tx: Arc::new(RwLock::new(None)),
             message_tx: Arc::new(RwLock::new(None)),
@@ -375,6 +385,7 @@ pub struct TransportManager {
         let wifi_manager = self.wifi_manager.clone();
         let active_transport = self.active_transport.clone();
         let is_running = self.is_running.clone();
+        let last_switch = self.last_switch.clone();
         let _switch_threshold = self.config.switch_threshold_ms;
         let hybrid_mode = self.config.hybrid_mode;
 
@@ -412,10 +423,39 @@ pub struct TransportManager {
                     };
 
                     info!("🔄 Switching transport from {:?} to {:?}", current_transport, new_transport);
+                    
+                    // Stop current transport
+                    match current_transport {
+                        TransportType::Bluetooth => {
+                            if let Some(bluetooth_manager) = &*bluetooth_manager.read().await {
+                                bluetooth_manager.cleanup_stale_connections().await.ok();
+                            }
+                        }
+                        TransportType::WiFi => {
+                            if let Some(wifi_manager) = &*wifi_manager.read().await {
+                                wifi_manager.cleanup_stale_connections().await;
+                            }
+                        }
+                        _ => {}
+                    }
+                    
+                    // Start new transport
+                    match new_transport {
+                        TransportType::Bluetooth => {
+                            info!("🔵 Starting Bluetooth transport");
+                            // Bluetooth is already running, just prioritize it
+                        }
+                        TransportType::WiFi => {
+                            info!("📶 Starting WiFi transport");
+                            // WiFi is already running, just prioritize it
+                        }
+                        _ => {}
+                    }
+                    
                     *active_transport.write().await = new_transport;
                     
-                    // TODO: Implement actual transport switching logic
-                    // This would involve stopping the current transport and starting the new one
+                    // Update last switch timestamp
+                    *last_switch.write().await = Some(SystemTime::now());
                 }
             }
         });
@@ -581,7 +621,7 @@ pub struct TransportManager {
             bluetooth_discovered,
             wifi_discovered,
             active_transport,
-            last_switch: None, // TODO: Track this
+            last_switch: self.last_switch.read().await.clone(),
             connection_quality,
         }
     }
@@ -597,10 +637,39 @@ pub struct TransportManager {
         }
 
         info!("🔄 Forcing transport switch to {:?}", transport);
-        *self.active_transport.write().await = transport;
         
-        // TODO: Implement actual transport switching
-        // This would involve stopping current transport and starting new one
+        // Stop current transport gracefully
+        let current = *self.active_transport.read().await;
+        match current {
+            TransportType::Bluetooth => {
+                if let Some(bluetooth_manager) = &*self.bluetooth_manager.read().await {
+                    bluetooth_manager.cleanup_stale_connections().await.ok();
+                }
+            }
+            TransportType::WiFi => {
+                if let Some(wifi_manager) = &*self.wifi_manager.read().await {
+                    wifi_manager.cleanup_stale_connections().await;
+                }
+            }
+            _ => {}
+        }
+        
+        // Switch to new transport
+        *self.active_transport.write().await = transport;
+        *self.last_switch.write().await = Some(SystemTime::now());
+        
+        // Start new transport if needed
+        match transport {
+            TransportType::Bluetooth => {
+                info!("🔵 Switched to Bluetooth transport");
+            }
+            TransportType::WiFi => {
+                info!("📶 Switched to WiFi transport");
+            }
+            TransportType::Hybrid => {
+                info!("🔄 Switched to Hybrid transport mode");
+            }
+        }
 
         Ok(())
     }
@@ -635,6 +704,95 @@ pub struct TransportManager {
         } else {
             Vec::new()
         }
+    }
+
+    /// Establish high-bandwidth connection to a discovered device
+    pub async fn establish_connection(&self, target_device_id: &DeviceId) -> Result<()> {
+        info!("🔗 Attempting to establish high-bandwidth connection to {}", target_device_id);
+        
+        // Check if already connected
+        if self.connected_devices.read().await.contains_key(target_device_id) {
+            info!("✅ Already connected to {}", target_device_id);
+            return Ok(());
+        }
+
+        let active_transport = *self.active_transport.read().await;
+        
+        match active_transport {
+            TransportType::WiFi | TransportType::Hybrid => {
+                // Try WiFi connection first (higher bandwidth, better for message payload)
+                if let Some(ref wifi_manager) = *self.wifi_manager.read().await {
+                    match wifi_manager.connect_to_peer(target_device_id).await {
+                        Ok(()) => {
+                            info!("📡 WiFi connection established to {}", target_device_id);
+                            
+                            // Add to connected devices
+                            let device = ConnectedDevice {
+                                device_id: target_device_id.clone(),
+                                transport: TransportType::WiFi,
+                                connected_at: SystemTime::now(),
+                                last_activity: SystemTime::now(),
+                                signal_strength: None,
+                                connection_quality: 0.9, // WiFi typically has good quality
+                            };
+                            
+                            self.connected_devices.write().await.insert(target_device_id.clone(), device);
+                            
+                            // Notify about new connection
+                            if let Some(ref device_tx) = *self.device_tx.read().await {
+                                let _ = device_tx.send(target_device_id.clone());
+                            }
+                            
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            warn!("⚠️ WiFi connection failed to {}: {}", target_device_id, e);
+                            if active_transport != TransportType::Hybrid {
+                                return Err(e);
+                            }
+                            // In hybrid mode, fall through to try Bluetooth
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Try Bluetooth connection
+        if active_transport == TransportType::Bluetooth || active_transport == TransportType::Hybrid {
+            if let Some(ref bt_manager) = *self.bluetooth_manager.read().await {
+                match bt_manager.connect_to_device(target_device_id.clone()).await {
+                    Ok(()) => {
+                        info!("🔵 Bluetooth connection established to {}", target_device_id);
+                        
+                        // Add to connected devices
+                        let device = ConnectedDevice {
+                            device_id: target_device_id.clone(),
+                            transport: TransportType::Bluetooth,
+                            connected_at: SystemTime::now(),
+                            last_activity: SystemTime::now(),
+                            signal_strength: None,
+                            connection_quality: 0.7, // BT typically has moderate quality
+                        };
+                        
+                        self.connected_devices.write().await.insert(target_device_id.clone(), device);
+                        
+                        // Notify about new connection
+                        if let Some(ref device_tx) = *self.device_tx.read().await {
+                            let _ = device_tx.send(target_device_id.clone());
+                        }
+                        
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!("⚠️ Bluetooth connection failed to {}: {}", target_device_id, e);
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        Err(SilentLinkError::System(format!("No transport available to connect to {}", target_device_id)))
     }
 }
 

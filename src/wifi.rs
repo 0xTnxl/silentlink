@@ -622,6 +622,145 @@ impl WiFiManager {
         // Simple heuristic: prefer WiFi if we have more WiFi connections
         wifi_peers > 2 || wifi_connections > 1
     }
+
+    /// Establish direct connection to a discovered peer
+    pub async fn connect_to_peer(&self, target_device_id: &DeviceId) -> Result<()> {
+        info!("🔗 Attempting WiFi connection to {}", target_device_id);
+        
+        // Check if already connected
+        if self.active_connections.read().await.contains_key(target_device_id) {
+            info!("✅ Already connected to {} via WiFi", target_device_id);
+            return Ok(());
+        }
+
+        // Look up discovered peer
+        let discovered_peers = self.discovered_peers.read().await;
+        let peer = discovered_peers.get(target_device_id)
+            .ok_or_else(|| SilentLinkError::DeviceNotFound(format!("Device {} not discovered", target_device_id)))?;
+        
+        // Get connection details from beacon
+        let peer_port = peer.service_port;
+        drop(discovered_peers); // Release the read lock
+        
+        // Try connecting to peer's service port
+        let _target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::BROADCAST), peer_port);
+        
+        // In a real implementation, you'd need to discover the actual IP of the peer
+        // For now, try common local network addresses
+        let potential_ips = vec![
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(192, 168, 1, 101), 
+            Ipv4Addr::new(192, 168, 1, 102),
+            Ipv4Addr::new(10, 0, 0, 100),
+            Ipv4Addr::new(10, 0, 0, 101),
+        ];
+
+        for ip in potential_ips {
+            let target_addr = SocketAddr::new(IpAddr::V4(ip), peer_port);
+            
+            match tokio::time::timeout(
+                Duration::from_millis(self.config.connection_timeout_ms),
+                TcpStream::connect(target_addr)
+            ).await {
+                Ok(Ok(mut stream)) => {
+                    info!("🎯 Connected to peer {} at {}", target_device_id, target_addr);
+                    
+                    // Send handshake
+                    let handshake = WiFiHandshake {
+                        device_id: self.device_id.clone(),
+                        protocol_version: "1.0".to_string(),
+                        supported_features: vec!["messaging".to_string(), "file_transfer".to_string()],
+                        timestamp: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                    };
+                    
+                    let handshake_json = serde_json::to_string(&handshake)?;
+                    stream.write_all(handshake_json.as_bytes()).await
+                        .map_err(|e| SilentLinkError::Network(e.to_string()))?;
+                    stream.write_all(b"\n").await
+                        .map_err(|e| SilentLinkError::Network(e.to_string()))?;
+                    
+                    // Create connection record
+                    let connection = WiFiConnection {
+                        device_id: target_device_id.clone(),
+                        socket_addr: target_addr,
+                        connected_at: SystemTime::now(),
+                        last_activity: Arc::new(RwLock::new(SystemTime::now())),
+                        is_active: Arc::new(AtomicBool::new(true)),
+                    };
+                    
+                    // Store connection
+                    self.active_connections.write().await.insert(target_device_id.clone(), connection);
+                    
+                    // Start connection handler (similar to existing accept handler)
+                    let device_id = target_device_id.clone();
+                    let active_connections = self.active_connections.clone();
+                    
+                    tokio::spawn(async move {
+                        let mut buffer = vec![0u8; 8192];
+                        
+                        loop {
+                            match stream.read(&mut buffer).await {
+                                Ok(0) => {
+                                    debug!("WiFi connection to {} closed", device_id);
+                                    break;
+                                }
+                                Ok(n) => {
+                                    debug!("Received {} bytes from WiFi connection {}", n, device_id);
+                                    // Update last activity
+                                    if let Some(conn) = active_connections.read().await.get(&device_id) {
+                                        *conn.last_activity.write().await = SystemTime::now();
+                                    }
+                                    // Message handling would go here
+                                }
+                                Err(e) => {
+                                    warn!("Error reading from WiFi connection {}: {}", device_id, e);
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        // Clean up connection
+                        active_connections.write().await.remove(&device_id);
+                    });
+                    
+                    return Ok(());
+                }
+                Ok(Err(e)) => {
+                    debug!("Failed to connect to {} at {}: {}", target_device_id, target_addr, e);
+                    continue;
+                }
+                Err(_) => {
+                    debug!("Connection timeout to {} at {}", target_device_id, target_addr);
+                    continue;
+                }
+            }
+        }
+
+        Err(SilentLinkError::Network(format!("Could not establish WiFi connection to {}", target_device_id)))
+    }
+
+    pub async fn cleanup_stale_connections(&self) {
+        let mut connections = self.active_connections.write().await;
+        let cutoff = SystemTime::now() - Duration::from_secs(300); // 5 minutes
+        
+        let stale_devices: Vec<DeviceId> = connections
+            .iter()
+            .filter_map(|(id, conn)| {
+                if conn.connected_at < cutoff && !conn.is_active.load(Ordering::Acquire) {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for device_id in stale_devices {
+            if let Some(connection) = connections.remove(&device_id) {
+                connection.is_active.store(false, Ordering::Release);
+                info!("Cleaned up stale WiFi connection to: {}", device_id);
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for WiFiManager {
