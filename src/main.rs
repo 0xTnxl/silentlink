@@ -1324,7 +1324,7 @@ impl MessageRouter {
                 
                 let stats = stats_clone3.read().await;
                 info!(
-                    "📊 Stats - Sent: {}, Received: {}, Forwarded: {}, Dropped: {}, Neighbors: {}",
+                    "Stats - Sent: {}, Received: {}, Forwarded: {}, Dropped: {}, Neighbors: {}",
                     stats.messages_sent,
                     stats.messages_received,
                     stats.messages_forwarded,

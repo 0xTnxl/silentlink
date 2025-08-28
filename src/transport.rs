@@ -422,7 +422,7 @@ impl TransportManager {
                         TransportType::Hybrid => current_transport,
                     };
 
-                    info!("🔄 Switching transport from {:?} to {:?}", current_transport, new_transport);
+                    info!("Switching transport from {:?} to {:?}", current_transport, new_transport);
                     
                     // Stop current transport
                     match current_transport {

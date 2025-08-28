@@ -74,7 +74,7 @@ pub struct WiFiManager {
 
 impl WiFiManager {
     pub async fn new(config: WiFiConfig, device_id: DeviceId, device_name: String) -> Result<Self> {
-        info!("🔧 Initializing WiFi Direct manager");
+        info!("Initializing WiFi Direct manager");
         
         // Check if WiFi is available
         if !Self::check_wifi_availability().await {
@@ -141,7 +141,7 @@ impl WiFiManager {
             return Err(SilentLinkError::System("WiFi manager already running".to_string()));
         }
 
-        info!("🚀 Starting WiFi Direct manager");
+        info!("Starting WiFi Direct manager");
 
         // Create channels for events
         let (device_tx, device_rx) = mpsc::unbounded_channel();
@@ -155,7 +155,7 @@ impl WiFiManager {
             let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port_to_try);
             match TcpListener::bind(bind_addr).await {
                 Ok(tcp_listener) => {
-                    info!("🔊 WiFi listener started on port {}", port_to_try);
+                    info!("WiFi listener started on port {}", port_to_try);
                     if port_to_try != self.config.p2p_port {
                         warn!("Using fallback port {} instead of configured port {}", 
                               port_to_try, self.config.p2p_port);
@@ -301,7 +301,7 @@ impl WiFiManager {
         let peer_handshake: WiFiHandshake = serde_json::from_slice(&peer_handshake_data)?;
         let peer_device_id = peer_handshake.device_id.clone();
 
-        info!("🤝 WiFi handshake completed with device: {} at {}", peer_device_id, addr);
+        info!("WiFi handshake completed with device: {} at {}", peer_device_id, addr);
 
         // Store connection
         let connection = WiFiConnection {
@@ -393,7 +393,7 @@ impl WiFiManager {
             }
         });
 
-        info!("📡 WiFi discovery beacon started");
+        info!("WiFi discovery beacon started");
         Ok(())
     }
 
@@ -411,7 +411,7 @@ impl WiFiManager {
             for attempt in 0..5 {
                 match tokio::net::UdpSocket::bind(format!("0.0.0.0:{}", discovery_port)).await {
                     Ok(s) => {
-                        info!("👂 WiFi peer discovery listening on port {}", discovery_port);
+                        info!("WiFi peer discovery listening on port {}", discovery_port);
                         if discovery_port != original_discovery_port {
                             warn!("Using fallback discovery port {} instead of configured port {}", 
                                   discovery_port, original_discovery_port);
@@ -474,7 +474,7 @@ impl WiFiManager {
             }
         });
 
-        info!("👂 WiFi peer discovery started");
+        info!("WiFi peer discovery started");
         Ok(())
     }
 
@@ -496,7 +496,7 @@ impl WiFiManager {
                 connections.retain(|device_id, connection| {
                     let last_activity = *connection.last_activity.blocking_read();
                     if last_activity < cutoff {
-                        info!("🧹 Cleaning up stale WiFi connection to {}", device_id);
+                        info!("Cleaning up stale WiFi connection to {}", device_id);
                         connection.is_active.store(false, Ordering::Release);
                         false
                     } else {
@@ -540,7 +540,7 @@ impl WiFiManager {
                 beacon.service_port
             );
 
-            info!("📱 Attempting WiFi connection to {} at {}", target_device_id, target_addr);
+            info!("Attempting WiFi connection to {} at {}", target_device_id, target_addr);
 
             match tokio::time::timeout(
                 Duration::from_millis(self.config.connection_timeout_ms),
@@ -625,7 +625,7 @@ impl WiFiManager {
 
     /// Establish direct connection to a discovered peer
     pub async fn connect_to_peer(&self, target_device_id: &DeviceId) -> Result<()> {
-        info!("🔗 Attempting WiFi connection to {}", target_device_id);
+        info!("Attempting WiFi connection to {}", target_device_id);
         
         // Check if already connected
         if self.active_connections.read().await.contains_key(target_device_id) {
@@ -663,7 +663,7 @@ impl WiFiManager {
                 TcpStream::connect(target_addr)
             ).await {
                 Ok(Ok(mut stream)) => {
-                    info!("🎯 Connected to peer {} at {}", target_device_id, target_addr);
+                    info!("Connected to peer {} at {}", target_device_id, target_addr);
                     
                     // Send handshake
                     let handshake = WiFiHandshake {

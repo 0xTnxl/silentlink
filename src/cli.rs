@@ -281,7 +281,7 @@ pub async fn run_cli() -> Result<()> {
                 info!("No target specified - attempting local payload injection");
                 let injection_results = silentlink.inject_payload_to_apps(payload.as_bytes()).await?;
                 
-                println!("📊 Injection Results:");
+                println!("Injection Results:");
                 for result in &injection_results {
                     let status = if result.success { "SUCCESS" } else { "FAILED" };
                     println!("  {} - {}: {} ({})", status, result.app_name, result.exploit_used, result.message);
