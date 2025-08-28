@@ -214,7 +214,7 @@ impl WiFiManager {
         // Start connection cleanup task
         self.start_cleanup_task().await?;
 
-        info!("✅ WiFi Direct manager started successfully");
+        info!("WiFi Direct manager started successfully");
         Ok((device_rx, message_rx))
     }
 
@@ -547,7 +547,7 @@ impl WiFiManager {
                 TcpStream::connect(target_addr)
             ).await {
                 Ok(Ok(_stream)) => {
-                    info!("✅ WiFi connection established to {}", target_device_id);
+                    info!("WiFi connection established to {}", target_device_id);
                     // Connection handling will be done by the peer's accept loop
                     Ok(())
                 }
@@ -594,7 +594,7 @@ impl WiFiManager {
     }
 
     pub async fn stop(&self) {
-        info!("🛑 Stopping WiFi Direct manager");
+        info!("Stopping WiFi Direct manager");
         self.is_running.store(false, Ordering::Release);
         
         // Close all connections
@@ -606,7 +606,7 @@ impl WiFiManager {
                    connection.connected_at.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs());
         }
 
-        info!("✅ WiFi Direct manager stopped");
+        info!("WiFi Direct manager stopped");
     }
 
     /// Check if WiFi is preferred over Bluetooth based on conditions
@@ -629,7 +629,7 @@ impl WiFiManager {
         
         // Check if already connected
         if self.active_connections.read().await.contains_key(target_device_id) {
-            info!("✅ Already connected to {} via WiFi", target_device_id);
+            info!("Already connected to {} via WiFi", target_device_id);
             return Ok(());
         }
 

